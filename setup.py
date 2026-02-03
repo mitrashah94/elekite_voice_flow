@@ -14,6 +14,7 @@ from pathlib import Path
 APP_NAME = "VoiceFlow"
 CONFIG_DIR = Path.home() / ".voiceflow"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+LOG_FILE = CONFIG_DIR / "voiceflow.log"
 
 REQUIRED_PACKAGES = [
     "sounddevice",
