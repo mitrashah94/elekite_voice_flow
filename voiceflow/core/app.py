@@ -34,11 +34,45 @@ from .config import (
     log, load_config, save_config, load_dictionary,
 )
 from .audio import AudioRecorder
-from .transcriber import Transcriber
+from .transcriber import Transcriber, TranscriptionError
 from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, ALTERNATE_HOTKEY
 
 # Import platform services
 from voiceflow.platform import clipboard, notifications, sounds, tray
+
+
+# ---------------------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------------------
+
+def paste_transcription(text: str) -> bool:
+    """Copy text to clipboard and paste. Handle failures gracefully.
+
+    Per CONTEXT.md:
+    - On failure: error sound + notification "Paste failed - text copied to clipboard"
+    - Leave transcription in clipboard so user can manually paste
+
+    Args:
+        text: The transcription text to paste
+
+    Returns:
+        True if paste succeeded, False if it failed (text still in clipboard)
+    """
+    # Always copy to clipboard first (user decision: leave in clipboard on failure)
+    clipboard.copy_to_clipboard(text)
+
+    try:
+        clipboard.paste()
+        return True
+    except Exception as e:
+        log(f"Paste failed: {e}")
+        sounds.play("error")
+        notifications.send(
+            "Paste Failed",
+            "Paste failed - text copied to clipboard"
+        )
+        # Don't raise - text is in clipboard, user can paste manually
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +252,10 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             text = self.transcriber.process(audio_path)
             if text:
                 if self.config.get("auto_paste", True):
-                    clipboard.copy_to_clipboard(text)
-                    clipboard.paste()
-                    log(f"Pasted: {text[:80]}...")
+                    paste_success = paste_transcription(text)
+                    if paste_success:
+                        log(f"Pasted: {text[:80]}...")
+                    # If paste failed, paste_transcription already showed error notification
                 if self.config.get("show_notification"):
                     preview = text[:80] + ("..." if len(text) > 80 else "")
                     notifications.send("VoiceFlow", preview)
@@ -237,7 +272,13 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                     self.status_item.title = "No speech detected"
                 if self.config.get("sound_feedback"):
                     sounds.play("error")
+        except TranscriptionError as e:
+            # TranscriptionError already played sound and showed notification in transcriber
+            log(f"Transcription error: {e}")
+            if rumps is not None:
+                self.status_item.title = f"Error: {str(e)[:40]}"
         except Exception as e:
+            # Unexpected errors - play sound and notify
             log(f"Error processing audio: {e}")
             if rumps is not None:
                 self.status_item.title = f"Error: {str(e)[:40]}"
@@ -344,11 +385,16 @@ class VoiceFlowCLI:
             if text:
                 print(f"\nTranscription:\n{text}\n")
                 if self.config.get("auto_paste", True):
-                    clipboard.copy_to_clipboard(text)
-                    clipboard.paste()
-                    print("Pasted to cursor!")
+                    paste_success = paste_transcription(text)
+                    if paste_success:
+                        print("Pasted to cursor!")
+                    else:
+                        print("Paste failed - text copied to clipboard")
             else:
                 print("No speech detected")
+        except TranscriptionError as e:
+            # TranscriptionError already played sound and showed notification
+            print(f"Transcription error: {e}")
         except Exception as e:
             print(f"Error: {e}")
         finally:

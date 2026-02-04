@@ -4,11 +4,27 @@ import os
 
 # Lazy import for optional dependency
 try:
-    from openai import OpenAI
+    from openai import OpenAI, OpenAIError, AuthenticationError, APIConnectionError, RateLimitError
 except ImportError:
     OpenAI = None
+    OpenAIError = None
+    AuthenticationError = None
+    APIConnectionError = None
+    RateLimitError = None
 
 from .config import log, load_dictionary
+
+# Import platform services for error notifications
+from voiceflow.platform import notifications, sounds
+
+
+class TranscriptionError(Exception):
+    """Raised when transcription fails with a user-friendly message.
+
+    This exception is raised after error sound and notification have been sent,
+    so callers should not duplicate the error feedback.
+    """
+    pass
 
 
 class Transcriber:
@@ -28,7 +44,11 @@ class Transcriber:
         return self._client
 
     def transcribe(self, audio_path: str) -> str:
-        """Send audio to Whisper and return raw transcript."""
+        """Send audio to Whisper and return raw transcript.
+
+        Raises:
+            TranscriptionError: On API errors (after showing notification)
+        """
         log(f"Transcribing {audio_path} ...")
         kwargs = {
             "model": self.config.get("whisper_model", "whisper-1"),
@@ -49,13 +69,55 @@ class Transcriber:
         if prompt_parts:
             kwargs["prompt"] = " | ".join(prompt_parts)
 
-        result = self.client.audio.transcriptions.create(**kwargs)
-        text = result.strip() if isinstance(result, str) else str(result).strip()
-        log(f"Raw transcript: {text[:120]}...")
-        return text
+        try:
+            result = self.client.audio.transcriptions.create(**kwargs)
+            text = result.strip() if isinstance(result, str) else str(result).strip()
+            log(f"Raw transcript: {text[:120]}...")
+            return text
+
+        except AuthenticationError as e:
+            error_msg = "Transcription failed: Invalid API key"
+            log(f"Auth error: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except APIConnectionError as e:
+            error_msg = "Transcription failed: Network error"
+            log(f"Connection error: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except RateLimitError as e:
+            error_msg = "Transcription failed: Rate limit exceeded"
+            log(f"Rate limit: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except OpenAIError as e:
+            # Catch-all for other OpenAI errors
+            error_msg = f"Transcription failed: {type(e).__name__}"
+            log(f"OpenAI error: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except Exception as e:
+            # Non-OpenAI errors (shouldn't happen but be safe)
+            error_msg = "Transcription failed: Unexpected error"
+            log(f"Unexpected error during transcription: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
 
     def cleanup(self, raw_text: str) -> str:
-        """Use GPT to clean up filler words, fix grammar, and format."""
+        """Use GPT to clean up filler words, fix grammar, and format.
+
+        Raises:
+            TranscriptionError: On API errors (after showing notification)
+        """
         if not self.config.get("ai_cleanup", True):
             return raw_text
 
@@ -75,18 +137,53 @@ class Transcriber:
         if self.config.get("custom_prompt"):
             system_prompt += f"\n\nAdditional instructions: {self.config['custom_prompt']}"
 
-        response = self.client.chat.completions.create(
-            model=self.config.get("cleanup_model", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": raw_text},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
-        )
-        cleaned = response.choices[0].message.content.strip()
-        log(f"Cleaned text: {cleaned[:120]}...")
-        return cleaned
+        try:
+            response = self.client.chat.completions.create(
+                model=self.config.get("cleanup_model", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": raw_text},
+                ],
+                temperature=0.3,
+                max_tokens=4096,
+            )
+            cleaned = response.choices[0].message.content.strip()
+            log(f"Cleaned text: {cleaned[:120]}...")
+            return cleaned
+
+        except AuthenticationError as e:
+            error_msg = "Cleanup failed: Invalid API key"
+            log(f"Auth error during cleanup: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except APIConnectionError as e:
+            error_msg = "Cleanup failed: Network error"
+            log(f"Connection error during cleanup: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except RateLimitError as e:
+            error_msg = "Cleanup failed: Rate limit exceeded"
+            log(f"Rate limit during cleanup: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except OpenAIError as e:
+            # Catch-all for other OpenAI errors
+            error_msg = f"Cleanup failed: {type(e).__name__}"
+            log(f"OpenAI error during cleanup: {e}")
+            sounds.play("error")
+            notifications.send("Transcription Error", error_msg)
+            raise TranscriptionError(error_msg) from e
+
+        except Exception as e:
+            # Non-OpenAI errors - don't fail silently, but continue with raw text
+            log(f"Unexpected error during cleanup: {e} - returning raw text")
+            return raw_text
 
     def process(self, audio_path: str) -> str:
         """Full pipeline: transcribe -> cleanup -> return final text."""
