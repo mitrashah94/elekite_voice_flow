@@ -35,6 +35,7 @@ from .config import (
 )
 from .audio import AudioRecorder
 from .transcriber import Transcriber
+from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, ALTERNATE_HOTKEY
 
 # Import platform services
 from voiceflow.platform import clipboard, notifications, sounds, tray
@@ -146,27 +147,30 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
     ICON_IDLE = "mic"
     ICON_RECORDING = "mic.fill"
 
-    def __init__(self):
+    def __init__(self, config: dict = None, is_fallback_hotkey: bool = False):
         if _TrayAppBase is not None:
             super().__init__(
                 APP_NAME,
                 title="mic",
                 quit_button=None,
             )
-        self.config = load_config()
+        self.config = config if config is not None else load_config()
         self.recorder = AudioRecorder()
         self.transcriber = Transcriber(self.config)
         self.hotkey_mgr = None
         self._processing = False
+        self._is_fallback_hotkey = is_fallback_hotkey
 
         # Build menu
         if rumps is not None:
             self.status_item = rumps.MenuItem("Ready — waiting for hotkey", callback=None)
             self.status_item.set_callback(None)
 
-            hotkey_display = self.config["hotkey"].capitalize()
+            hotkey_display = get_hotkey_display_name(self.config["hotkey"])
             mode_display = "Hold" if self.config["mode"] == "hold" else "Toggle"
-            self.hotkey_info = rumps.MenuItem(f"Hotkey: {hotkey_display} ({mode_display})", callback=None)
+            # Show fallback indicator in menu if using fallback hotkey
+            fallback_indicator = " (fallback)" if is_fallback_hotkey else ""
+            self.hotkey_info = rumps.MenuItem(f"Hotkey: {hotkey_display}{fallback_indicator} ({mode_display})", callback=None)
 
             self.menu = [
                 self.status_item,
@@ -310,11 +314,12 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
 class VoiceFlowCLI:
     """Terminal-based fallback for systems without rumps."""
 
-    def __init__(self):
-        self.config = load_config()
+    def __init__(self, config: dict = None, is_fallback_hotkey: bool = False):
+        self.config = config if config is not None else load_config()
         self.recorder = AudioRecorder()
         self.transcriber = Transcriber(self.config)
         self._processing = False
+        self._is_fallback_hotkey = is_fallback_hotkey
 
     def _start_recording(self):
         if self._processing:
@@ -355,11 +360,14 @@ class VoiceFlowCLI:
 
     def run(self):
         log(f"{APP_NAME} v{APP_VERSION} started (CLI mode)")
+        hotkey_display = get_hotkey_display_name(self.config['hotkey'])
+        fallback_indicator = " (fallback)" if self._is_fallback_hotkey else ""
         print(f"""
 +------------------------------------------------------+
 |              VoiceFlow v{APP_VERSION}                    |
 |                                                      |
-|   Hotkey : {self.config['hotkey']:<10s}  Mode : {self.config['mode']:<10s}      |
+|   Hotkey : {hotkey_display + fallback_indicator:<20s}               |
+|   Mode   : {self.config['mode']:<10s}                        |
 |   AI Cleanup : {'On' if self.config.get('ai_cleanup') else 'Off':<5s}                              |
 |                                                      |
 |   Press Ctrl+C to quit                               |
@@ -441,12 +449,27 @@ def main():
     if not DICTIONARY_FILE.exists():
         DICTIONARY_FILE.write_text("# Add custom words/names here, one per line\n# These help Whisper recognize uncommon terms\n")
 
+    # Detect available hotkey with fallback
+    active_hotkey, is_fallback = get_active_hotkey()
+
+    if is_fallback:
+        # Notify user about fallback (one-time notification per CONTEXT.md)
+        fallback_display = get_hotkey_display_name(active_hotkey)
+        notifications.send(
+            "Hotkey Changed",
+            f"Primary hotkey unavailable. Using {fallback_display} instead."
+        )
+        log(f"Using fallback hotkey: {active_hotkey}")
+
+    # Override config hotkey with active hotkey
+    cfg["hotkey"] = active_hotkey
+
     # Choose menu-bar app or CLI
     if tray.is_available() and sys.platform == "darwin":
-        app = VoiceFlowApp()
+        app = VoiceFlowApp(config=cfg, is_fallback_hotkey=is_fallback)
         app.run()
     else:
-        cli = VoiceFlowCLI()
+        cli = VoiceFlowCLI(config=cfg, is_fallback_hotkey=is_fallback)
         cli.run()
 
 
