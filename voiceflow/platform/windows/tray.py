@@ -1,6 +1,8 @@
 """Windows system tray support using pystray."""
 
 import os
+import subprocess
+import sys
 
 from ..interfaces import TrayService
 
@@ -126,20 +128,25 @@ class WindowsTrayApp:
         icon.notify(self._get_status_text(), "VoiceFlow")
 
     def _open_settings(self, icon, item):
-        """Open settings/config file in default editor."""
-        from voiceflow.core.config import CONFIG_FILE, CONFIG_DIR
+        """Open the settings GUI."""
+        # Find settings_gui.py - it's at project root
+        # This file is at voiceflow/platform/windows/tray.py
+        # Go up 3 levels to reach project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        settings_script = os.path.join(project_root, "settings_gui.py")
 
-        # Ensure config directory exists
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-        config_path = str(CONFIG_FILE)
-        if os.path.exists(config_path):
-            os.startfile(config_path)
+        if os.path.exists(settings_script):
+            # Use pythonw on Windows to avoid console window
+            python_exe = sys.executable
+            if sys.platform == "win32":
+                pythonw = python_exe.replace("python.exe", "pythonw.exe")
+                if os.path.exists(pythonw):
+                    python_exe = pythonw
+            subprocess.Popen([python_exe, settings_script])
         else:
-            # Create a default config file first
-            from voiceflow.core.config import save_config
-            save_config(self.config)
-            os.startfile(config_path)
+            # Fallback: open config file directly
+            from voiceflow.core.config import CONFIG_FILE
+            os.startfile(str(CONFIG_FILE))
 
     def _view_log(self, icon, item):
         """Open log file in default viewer."""
