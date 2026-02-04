@@ -40,6 +40,18 @@ from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, 
 # Import platform services
 from voiceflow.platform import clipboard, notifications, sounds, tray
 
+# Conditional import for Windows tray support
+if sys.platform == "win32":
+    try:
+        from voiceflow.platform.windows.tray import WindowsTrayApp
+        WINDOWS_TRAY_AVAILABLE = True
+    except ImportError:
+        WindowsTrayApp = None
+        WINDOWS_TRAY_AVAILABLE = False
+else:
+    WindowsTrayApp = None
+    WINDOWS_TRAY_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Helper Functions
@@ -349,6 +361,132 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
 
 
 # ---------------------------------------------------------------------------
+# Windows Tray App (pystray)
+# ---------------------------------------------------------------------------
+
+class WindowsVoiceFlowApp:
+    """Windows system tray application for VoiceFlow.
+
+    Uses threading pattern: tray runs in background thread, hotkey in main thread.
+    This avoids conflicts between pynput keyboard listener and GUI event loop.
+    """
+
+    def __init__(self, config: dict = None, is_fallback_hotkey: bool = False):
+        self.config = config if config is not None else load_config()
+        self.recorder = AudioRecorder()
+        self.transcriber = Transcriber(self.config)
+        self._processing = False
+        self._is_fallback_hotkey = is_fallback_hotkey
+
+        # Create tray app (requires WindowsTrayApp to be available)
+        self.tray_app = WindowsTrayApp(
+            config=self.config,
+            on_start_recording=self._start_recording,
+            on_stop_recording=self._stop_recording,
+            is_fallback_hotkey=is_fallback_hotkey,
+        )
+
+        # Create hotkey manager
+        self.hotkey_mgr = HotkeyManager(
+            hotkey_name=self.config["hotkey"],
+            mode=self.config["mode"],
+            on_start=self._start_recording,
+            on_stop=self._stop_recording,
+        )
+
+    def _start_recording(self):
+        """Start audio recording."""
+        if self._processing:
+            return
+        if self.config.get("sound_feedback"):
+            sounds.play("start")
+        self.tray_app.set_state("recording")
+        self.recorder.start()
+
+    def _stop_recording(self):
+        """Stop audio recording and begin transcription."""
+        if not self.recorder.is_recording:
+            return
+        audio_path = self.recorder.stop()
+        if self.config.get("sound_feedback"):
+            sounds.play("stop")
+        self.tray_app.set_state("processing")
+
+        if audio_path:
+            # Process in background thread
+            threading.Thread(target=self._process_audio, args=(audio_path,), daemon=True).start()
+        else:
+            self.tray_app.set_state("idle")
+
+    def _process_audio(self, audio_path: str):
+        """Process recorded audio and transcribe."""
+        self._processing = True
+        try:
+            text = self.transcriber.process(audio_path)
+            if text:
+                if self.config.get("auto_paste", True):
+                    paste_success = paste_transcription(text)
+                    if paste_success:
+                        log(f"Pasted: {text[:80]}...")
+                    # If paste failed, paste_transcription already showed error notification
+                if self.config.get("show_notification"):
+                    preview = text[:80] + ("..." if len(text) > 80 else "")
+                    notifications.send("VoiceFlow", preview)
+                # Save recording if configured
+                if self.config.get("save_recordings"):
+                    RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    dest = RECORDING_DIR / f"recording_{ts}.wav"
+                    shutil.copy2(audio_path, dest)
+            else:
+                if self.config.get("sound_feedback"):
+                    sounds.play("error")
+        except TranscriptionError as e:
+            # TranscriptionError already played sound and showed notification in transcriber
+            log(f"Transcription error: {e}")
+        except Exception as e:
+            # Unexpected errors - play sound and notify
+            log(f"Error processing audio: {e}")
+            if self.config.get("sound_feedback"):
+                sounds.play("error")
+            if self.config.get("show_notification"):
+                notifications.send("VoiceFlow Error", str(e)[:100])
+        finally:
+            self._processing = False
+            self.tray_app.set_state("idle")
+            # Clean up temp file
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
+
+    def run(self):
+        """Run the Windows tray application.
+
+        Threading pattern: tray in background thread, hotkey in main thread.
+        Per research: pynput keyboard listener may conflict with GUI event loop,
+        so start hotkey listener in main thread.
+        """
+        log(f"{APP_NAME} v{APP_VERSION} started (Windows tray mode)")
+
+        # Start tray in daemon background thread
+        tray_thread = threading.Thread(target=self.tray_app.run, daemon=True)
+        tray_thread.start()
+
+        # Start hotkey listener in main thread
+        self.hotkey_mgr.start()
+
+        # Main loop - keep alive until KeyboardInterrupt
+        try:
+            while True:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.hotkey_mgr.stop()
+            self.tray_app.stop()
+            log(f"{APP_NAME} stopped")
+
+
+# ---------------------------------------------------------------------------
 # CLI fallback (no rumps / non-macOS)
 # ---------------------------------------------------------------------------
 
@@ -510,11 +648,17 @@ def main():
     # Override config hotkey with active hotkey
     cfg["hotkey"] = active_hotkey
 
-    # Choose menu-bar app or CLI
+    # Choose platform-specific app or CLI fallback
     if tray.is_available() and sys.platform == "darwin":
+        # macOS: Use rumps menu bar app
         app = VoiceFlowApp(config=cfg, is_fallback_hotkey=is_fallback)
         app.run()
+    elif sys.platform == "win32" and WINDOWS_TRAY_AVAILABLE:
+        # Windows: Use pystray system tray app
+        app = WindowsVoiceFlowApp(config=cfg, is_fallback_hotkey=is_fallback)
+        app.run()
     else:
+        # Fallback: CLI mode
         cli = VoiceFlowCLI(config=cfg, is_fallback_hotkey=is_fallback)
         cli.run()
 
