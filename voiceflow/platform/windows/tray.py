@@ -183,3 +183,55 @@ class WindowsTrayApp:
             Menu.SEPARATOR,
             MenuItem("Quit VoiceFlow", self._quit),
         )
+
+    def set_state(self, state: str) -> None:
+        """Update application state and icon.
+
+        Args:
+            state: One of "idle", "recording", or "processing"
+        """
+        self._state = state
+
+        if self._icon is not None:
+            # Update icon image
+            self._icon.icon = self._icons.get(state, self._icons["idle"])
+
+            # Update tooltip title
+            title_states = {
+                "idle": "VoiceFlow - Ready",
+                "recording": "VoiceFlow - Recording...",
+                "processing": "VoiceFlow - Transcribing...",
+            }
+            self._icon.title = title_states.get(state, "VoiceFlow - Ready")
+
+            # Refresh menu to update dynamic status text
+            self._icon.update_menu()
+
+    def _setup(self, icon):
+        """Setup callback for pystray - called after icon is ready.
+
+        This runs in a separate thread managed by pystray.
+        """
+        icon.visible = True
+
+    def run(self):
+        """Start the tray application.
+
+        Note: This method is blocking on Windows.
+        """
+        if not PYSTRAY_AVAILABLE:
+            return
+
+        self._icon = pystray.Icon(
+            name="VoiceFlow",
+            icon=self._icons["idle"],
+            title="VoiceFlow - Ready",
+            menu=self._create_menu()
+        )
+        self._icon.run(setup=self._setup)
+
+    def stop(self):
+        """Stop the tray application."""
+        if self._icon is not None:
+            self._icon.stop()
+            self._icon = None
