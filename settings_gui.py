@@ -38,16 +38,6 @@ DEFAULT_CONFIG = {
     "max_recording_seconds": 300,
 }
 
-HOTKEY_OPTIONS = [
-    ("Option (⌥)", "option"),
-    ("Right Option (⌥)", "option_r"),
-    ("Control (⌃)", "ctrl"),
-    ("Right Command (⌘)", "cmd_r"),
-    ("Caps Lock", "caps_lock"),
-    ("Fn", "fn"),
-    ("Shift", "shift"),
-]
-
 MODE_OPTIONS = [
     ("Hold to Record", "hold"),
     ("Toggle (press to start/stop)", "toggle"),
@@ -77,6 +67,60 @@ CLEANUP_MODELS = [
     ("GPT-4o (best quality)", "gpt-4o"),
     ("GPT-3.5 Turbo (fastest)", "gpt-3.5-turbo"),
 ]
+
+
+def get_platform_fonts():
+    """Return platform-appropriate fonts for the UI.
+
+    Returns:
+        tuple: (header_font, body_font, mono_font) as (name, size, weight) tuples
+    """
+    if sys.platform == "win32":
+        return (
+            ("Segoe UI", 12, "bold"),  # header
+            ("Segoe UI", 10),           # body
+            ("Consolas", 10)            # mono
+        )
+    else:
+        # macOS defaults
+        return (
+            ("SF Pro Display", 14, "bold"),  # header
+            ("SF Pro Text", 12),              # body
+            ("SF Mono", 11)                   # mono
+        )
+
+
+def get_hotkey_options():
+    """Return platform-appropriate hotkey options.
+
+    Returns:
+        list: List of (display_label, config_value) tuples
+    """
+    if sys.platform == "win32":
+        return [
+            ("Alt", "option"),
+            ("Right Alt", "option_r"),
+            ("Control", "ctrl"),
+            ("Right Windows", "cmd_r"),
+            ("Caps Lock", "caps_lock"),
+            ("Fn", "fn"),
+            ("Shift", "shift"),
+        ]
+    else:
+        # macOS options with symbols
+        return [
+            ("Option (\u2325)", "option"),
+            ("Right Option (\u2325)", "option_r"),
+            ("Control (\u2303)", "ctrl"),
+            ("Right Command (\u2318)", "cmd_r"),
+            ("Caps Lock", "caps_lock"),
+            ("Fn", "fn"),
+            ("Shift", "shift"),
+        ]
+
+
+# Get platform-appropriate options at module load time
+HOTKEY_OPTIONS = get_hotkey_options()
 
 
 class SettingsApp:
@@ -117,11 +161,18 @@ class SettingsApp:
         bg = "#f5f5f7" if sys.platform == "darwin" else "#ffffff"
         self.root.configure(bg=bg)
 
-        # Title
+        # Get platform-appropriate fonts
+        header_font, body_font, mono_font = get_platform_fonts()
+        self._header_font = header_font
+        self._body_font = body_font
+        self._mono_font = mono_font
+
+        # Title - use larger size for header title
         header = tk.Frame(self.root, bg="#1d1d1f", height=60)
         header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Label(header, text="🎙️ VoiceFlow Settings", font=("SF Pro Display", 18, "bold"),
+        title_font = (header_font[0], 18, "bold")
+        tk.Label(header, text="VoiceFlow Settings", font=title_font,
                  fg="white", bg="#1d1d1f").pack(pady=15)
 
         # Scrollable content
@@ -136,9 +187,14 @@ class SettingsApp:
         canvas.pack(side="left", fill="both", expand=True, padx=10, pady=5)
         scrollbar.pack(side="right", fill="y")
 
-        # Enable mousewheel scrolling
+        # Enable mousewheel scrolling (platform-aware delta handling)
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            if sys.platform == "win32":
+                # Windows: delta is in multiples of 120
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                # macOS: delta is already in units
+                canvas.yview_scroll(int(-1 * event.delta), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         self.content = scroll_frame
@@ -148,12 +204,16 @@ class SettingsApp:
         btn_frame = tk.Frame(self.root, bg=bg, height=50)
         btn_frame.pack(fill="x", pady=10, padx=20)
 
-        save_btn = tk.Button(btn_frame, text="Save Settings", font=("SF Pro Text", 13, "bold"),
+        # Use body font with slightly larger size for buttons
+        btn_font_bold = (self._body_font[0], self._body_font[1] + 1, "bold")
+        btn_font = (self._body_font[0], self._body_font[1] + 1)
+
+        save_btn = tk.Button(btn_frame, text="Save Settings", font=btn_font_bold,
                             bg="#0071e3", fg="white", relief="flat", padx=20, pady=8,
                             command=self._on_save, cursor="hand2")
         save_btn.pack(side="right")
 
-        cancel_btn = tk.Button(btn_frame, text="Cancel", font=("SF Pro Text", 13),
+        cancel_btn = tk.Button(btn_frame, text="Cancel", font=btn_font,
                               relief="flat", padx=20, pady=8,
                               command=self.root.destroy, cursor="hand2")
         cancel_btn.pack(side="right", padx=10)
@@ -163,7 +223,7 @@ class SettingsApp:
         bg = "#f5f5f7" if sys.platform == "darwin" else "#ffffff"
         frame = tk.Frame(parent, bg=bg)
         frame.pack(fill="x", padx=10, pady=(15, 5))
-        tk.Label(frame, text=title, font=("SF Pro Display", 14, "bold"),
+        tk.Label(frame, text=title, font=self._header_font,
                 bg=bg, fg="#1d1d1f", anchor="w").pack(fill="x")
         separator = tk.Frame(frame, bg="#d2d2d7", height=1)
         separator.pack(fill="x", pady=(5, 10))
@@ -173,7 +233,7 @@ class SettingsApp:
         bg = "#f5f5f7" if sys.platform == "darwin" else "#ffffff"
         row = tk.Frame(parent, bg=bg)
         row.pack(fill="x", pady=3, padx=5)
-        tk.Label(row, text=label_text, font=("SF Pro Text", 12),
+        tk.Label(row, text=label_text, font=self._body_font,
                 bg=bg, fg="#333333", width=22, anchor="w").pack(side="left")
         return row
 
@@ -181,19 +241,20 @@ class SettingsApp:
         bg = "#f5f5f7" if sys.platform == "darwin" else "#ffffff"
 
         # --- API Section ---
-        sec = self._section("🔑  API Configuration")
+        sec = self._section("API Configuration")
         row = self._field_row(sec, "OpenAI API Key:")
         self.api_key_var = tk.StringVar()
-        entry = tk.Entry(row, textvariable=self.api_key_var, font=("SF Mono", 11),
-                        width=35, show="•")
+        entry = tk.Entry(row, textvariable=self.api_key_var, font=self._mono_font,
+                        width=35, show="*")
         entry.pack(side="left", fill="x", expand=True)
-        self.show_key_btn = tk.Button(row, text="👁", font=("SF Pro Text", 10),
+        small_font = (self._body_font[0], self._body_font[1] - 2)
+        self.show_key_btn = tk.Button(row, text="Show", font=small_font,
                                       relief="flat", command=lambda: self._toggle_key_visibility(entry))
         self.show_key_btn.pack(side="left", padx=5)
         self._key_visible = False
 
         # --- Recording Section ---
-        sec = self._section("🎙️  Recording")
+        sec = self._section("Recording")
 
         row = self._field_row(sec, "Hotkey:")
         self.hotkey_var = tk.StringVar()
@@ -210,7 +271,7 @@ class SettingsApp:
         row = self._field_row(sec, "Max duration (sec):")
         self.max_duration_var = tk.IntVar()
         spin = tk.Spinbox(row, from_=10, to=600, textvariable=self.max_duration_var,
-                         width=10, font=("SF Pro Text", 11))
+                         width=10, font=self._body_font)
         spin.pack(side="left")
 
         row = self._field_row(sec, "Save recordings:")
@@ -219,7 +280,7 @@ class SettingsApp:
                       text="Keep WAV files in ~/.voiceflow/recordings/").pack(side="left")
 
         # --- Transcription Section ---
-        sec = self._section("📝  Transcription")
+        sec = self._section("Transcription")
 
         row = self._field_row(sec, "Language:")
         self.language_var = tk.StringVar()
@@ -229,11 +290,11 @@ class SettingsApp:
 
         row = self._field_row(sec, "Whisper prompt:")
         self.whisper_prompt_var = tk.StringVar()
-        tk.Entry(row, textvariable=self.whisper_prompt_var, font=("SF Pro Text", 11),
+        tk.Entry(row, textvariable=self.whisper_prompt_var, font=self._body_font,
                 width=35).pack(side="left", fill="x", expand=True)
 
         # --- AI Cleanup Section ---
-        sec = self._section("✨  AI Text Cleanup")
+        sec = self._section("AI Text Cleanup")
 
         row = self._field_row(sec, "Enable cleanup:")
         self.ai_cleanup_var = tk.BooleanVar()
@@ -250,14 +311,15 @@ class SettingsApp:
 
         row = self._field_row(sec, "Custom instructions:")
         self.custom_prompt_var = tk.StringVar()
-        tk.Entry(row, textvariable=self.custom_prompt_var, font=("SF Pro Text", 11),
+        tk.Entry(row, textvariable=self.custom_prompt_var, font=self._body_font,
                 width=35).pack(side="left", fill="x", expand=True)
 
+        small_font = (self._body_font[0], self._body_font[1] - 2)
         tk.Label(sec, text="e.g., 'Use British English spelling' or 'Format as bullet points'",
-                font=("SF Pro Text", 10), fg="#888888", bg=bg).pack(anchor="w", padx=5)
+                font=small_font, fg="#888888", bg=bg).pack(anchor="w", padx=5)
 
         # --- Output Section ---
-        sec = self._section("📤  Output")
+        sec = self._section("Output")
 
         row = self._field_row(sec, "Auto-paste at cursor:")
         self.auto_paste_var = tk.BooleanVar()
@@ -271,18 +333,20 @@ class SettingsApp:
 
         row = self._field_row(sec, "Notifications:")
         self.notification_var = tk.BooleanVar()
+        # Platform-appropriate notification text
+        notification_platform = "Windows" if sys.platform == "win32" else "macOS"
         tk.Checkbutton(row, variable=self.notification_var, bg=bg,
-                      text="Show macOS notification with result").pack(side="left")
+                      text=f"Show {notification_platform} notification with result").pack(side="left")
 
         # --- Dictionary Section ---
-        sec = self._section("📖  Custom Dictionary")
+        sec = self._section("Custom Dictionary")
         tk.Label(sec, text="Add words, names, and terms that Whisper should recognize:",
-                font=("SF Pro Text", 11), bg=bg, fg="#555555").pack(anchor="w", padx=5)
+                font=self._body_font, bg=bg, fg="#555555").pack(anchor="w", padx=5)
 
         dict_frame = tk.Frame(sec, bg=bg)
         dict_frame.pack(fill="x", padx=5, pady=5)
 
-        self.dict_text = tk.Text(dict_frame, font=("SF Mono", 11), height=5, width=55,
+        self.dict_text = tk.Text(dict_frame, font=self._mono_font, height=5, width=55,
                                 wrap="word", relief="solid", bd=1)
         self.dict_text.pack(side="left", fill="x", expand=True)
         dict_scroll = ttk.Scrollbar(dict_frame, command=self.dict_text.yview)
@@ -291,8 +355,8 @@ class SettingsApp:
 
     def _toggle_key_visibility(self, entry):
         self._key_visible = not self._key_visible
-        entry.config(show="" if self._key_visible else "•")
-        self.show_key_btn.config(text="🙈" if self._key_visible else "👁")
+        entry.config(show="" if self._key_visible else "*")
+        self.show_key_btn.config(text="Hide" if self._key_visible else "Show")
 
     def _toggle_cleanup(self):
         state = "readonly" if self.ai_cleanup_var.get() else "disabled"
