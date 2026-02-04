@@ -35,3 +35,47 @@ class WindowsTray(TrayService):
         if not PYSTRAY_AVAILABLE:
             return None
         return pystray.Icon
+
+
+# Icon generation utilities
+
+def _create_icon(color: str, size: int = 64):
+    """Create a circular icon with the specified color.
+
+    Args:
+        color: Color name (e.g., 'gray', 'red', 'orange')
+        size: Icon size in pixels (default 64 for high-DPI support)
+
+    Returns:
+        PIL.Image object or None if pystray/Pillow not available
+    """
+    if not PYSTRAY_AVAILABLE:
+        return None
+
+    # Create RGBA image with transparent background
+    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
+    # Draw filled circle with 4-pixel padding from edges
+    padding = 4
+    draw.ellipse(
+        [padding, padding, size - padding, size - padding],
+        fill=color
+    )
+
+    return image
+
+
+def create_idle_icon():
+    """Create gray circle icon for idle state."""
+    return _create_icon('gray')
+
+
+def create_recording_icon():
+    """Create red circle icon for recording state."""
+    return _create_icon('red')
+
+
+def create_processing_icon():
+    """Create orange circle icon for processing state."""
+    return _create_icon('orange')
