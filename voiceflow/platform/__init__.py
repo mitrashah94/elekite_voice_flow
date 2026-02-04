@@ -1,4 +1,10 @@
-"""Platform abstraction layer - auto-selects correct backend."""
+"""Platform abstraction layer - auto-selects correct backend.
+
+Note on hotkeys: Hotkey handling is NOT part of this abstraction.
+HotkeyManager in voiceflow/core/app.py uses pynput directly, which
+provides cross-platform hotkey support out of the box. No need to
+reinvent this wheel.
+"""
 
 import sys
 
@@ -15,8 +21,8 @@ if sys.platform == "darwin":
     from .macos import MacOSBackend
     _backend_class = MacOSBackend
 elif sys.platform == "win32":
-    # Windows backend will be added in Phase 2
-    raise ImportError("Windows backend not yet implemented")
+    from .windows import WindowsBackend
+    _backend_class = WindowsBackend
 else:
     raise ImportError(f"Unsupported platform: {sys.platform}")
 

@@ -7,5 +7,8 @@ sounddevice>=0.4.6
 numpy>=1.24.0
 pynput>=1.7.6
 
+# Windows clipboard (cross-platform, used by Windows backend)
+pyperclip>=1.8.0
+
 # macOS menu bar (optional — falls back to CLI mode without it)
 rumps>=0.4.0
