@@ -403,8 +403,35 @@ def check_dependencies():
         sys.exit(1)
 
 
+def check_microphone() -> bool:
+    """Check if a microphone is available. Warn if not.
+
+    Returns True if microphone is available, False otherwise.
+    Does not exit - user might connect a mic later.
+    """
+    try:
+        sd.check_input_settings()
+        log("Microphone check passed")
+        return True
+    except sd.PortAudioError as e:
+        print(f"Warning: No microphone detected - {e}")
+        print("VoiceFlow requires a microphone for voice recording.")
+        print("Please connect a microphone and restart the application.")
+        # Log the full device list for debugging
+        log(f"No microphone detected. Error: {e}")
+        try:
+            log(f"Available audio devices: {sd.query_devices()}")
+        except Exception:
+            log("Could not query audio devices")
+        return False
+
+
 def main():
     check_dependencies()
+    if not check_microphone():
+        # Continue anyway - user might connect mic later
+        # But they've been warned
+        pass
 
     # Ensure config directory exists with defaults
     cfg = load_config()

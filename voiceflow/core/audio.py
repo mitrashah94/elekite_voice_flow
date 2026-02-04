@@ -25,31 +25,53 @@ class AudioRecorder:
         self._stream = None
         self._recording = False
         self._lock = threading.Lock()
+        self._stop_due_to_error = False  # Track mid-recording device errors
 
     @property
     def is_recording(self) -> bool:
         return self._recording
 
     def start(self):
+        """Start recording. Handle device errors gracefully."""
         with self._lock:
             if self._recording:
                 return
             self._frames = []
             self._recording = True
-            self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype="int16",
-                callback=self._callback,
-                blocksize=1024,
-            )
-            self._stream.start()
-            log("Recording started")
+            self._stop_due_to_error = False  # Reset error flag
+            try:
+                self._stream = sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    dtype="int16",
+                    callback=self._callback,
+                    blocksize=1024,
+                )
+                self._stream.start()
+                log("Recording started")
+            except sd.PortAudioError as e:
+                log(f"Failed to start recording: {e}")
+                self._recording = False
+                self._stream = None
+                raise  # Let caller handle the error
 
     def _callback(self, indata, frames, time_info, status):
+        """Callback for audio stream. Handle mid-recording disconnect."""
         if status:
-            log(f"Audio status: {status}")
-        self._frames.append(indata.copy())
+            log(f"Audio stream status: {status}")
+            # Check for device errors that indicate disconnect
+            # status flags: input_overflow, input_underflow, output_overflow,
+            # output_underflow, priming_output - these are warnings
+            # But if we detect a device error, we should stop gracefully
+            status_str = str(status).lower()
+            if "error" in status_str or "device" in status_str:
+                log(f"Audio device error mid-recording: {status}")
+                self._stop_due_to_error = True
+                return  # Stop accepting new data
+
+        # Normal recording continues
+        if not self._stop_due_to_error:
+            self._frames.append(indata.copy())
 
     def stop(self) -> str | None:
         """Stop recording and return the path to a WAV file, or None."""
@@ -57,9 +79,18 @@ class AudioRecorder:
             if not self._recording:
                 return None
             self._recording = False
+
+            # Handle mid-recording device disconnect gracefully
+            if self._stop_due_to_error:
+                log("Recording stopped due to device error - processing captured audio")
+
             if self._stream:
-                self._stream.stop()
-                self._stream.close()
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except sd.PortAudioError as e:
+                    # Device disconnected - continue to process whatever we have
+                    log(f"Audio device error during stop: {e}")
                 self._stream = None
 
         if not self._frames:
