@@ -91,20 +91,24 @@ def create_processing_icon():
 class WindowsTrayApp:
     """Windows system tray application for VoiceFlow."""
 
-    def __init__(self, config: dict, on_start_recording, on_stop_recording, is_fallback_hotkey: bool = False):
+    def __init__(self, config: dict, on_start_recording, on_stop_recording,
+                 on_toggle_meeting=None, is_fallback_hotkey: bool = False):
         """Initialize the Windows tray application.
 
         Args:
             config: Application configuration dictionary
             on_start_recording: Callback for starting recording
             on_stop_recording: Callback for stopping recording
+            on_toggle_meeting: Callback for toggling meeting mode
             is_fallback_hotkey: Whether using fallback hotkey (for display)
         """
         self.config = config
         self._on_start_recording = on_start_recording
         self._on_stop_recording = on_stop_recording
+        self._on_toggle_meeting = on_toggle_meeting
         self._is_fallback_hotkey = is_fallback_hotkey
         self._state = "idle"
+        self._meeting_state = "idle"  # idle, active, processing
         self._icon = None
 
         # Pre-generate icons for each state
@@ -156,6 +160,30 @@ class WindowsTrayApp:
         if os.path.exists(log_path):
             os.startfile(log_path)
 
+    def _toggle_meeting(self, icon, item):
+        """Toggle meeting transcription mode."""
+        if self._on_toggle_meeting:
+            self._on_toggle_meeting()
+
+    def _get_meeting_text(self) -> str:
+        """Get dynamic meeting menu item text."""
+        if self._meeting_state == "active":
+            return "Stop Meeting"
+        elif self._meeting_state == "processing":
+            return "Processing meeting..."
+        return "Start Meeting..."
+
+    def set_meeting_state(self, state: str, has_system_audio: bool = False):
+        """Update meeting state and refresh menu.
+
+        Args:
+            state: One of "idle", "active", "processing"
+            has_system_audio: Whether system audio is being captured
+        """
+        self._meeting_state = state
+        if self._icon is not None:
+            self._icon.update_menu()
+
     def _quit(self, icon, item):
         """Quit the application."""
         icon.stop()
@@ -183,6 +211,12 @@ class WindowsTrayApp:
                 lambda text: f"Status: {self._get_status_text()}",
                 None,
                 enabled=False
+            ),
+            Menu.SEPARATOR,
+            MenuItem(
+                lambda text: self._get_meeting_text(),
+                self._toggle_meeting,
+                enabled=lambda item: self._meeting_state != "processing",
             ),
             Menu.SEPARATOR,
             MenuItem("Settings...", self._open_settings),

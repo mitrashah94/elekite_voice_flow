@@ -5,6 +5,7 @@ from .notifications import WindowsNotifications
 from .sounds import WindowsSounds
 from .tray import WindowsTray
 from .autostart import WindowsAutostart
+from .system_audio import WindowsSystemAudio
 
 
 class WindowsBackend:
@@ -22,6 +23,7 @@ class WindowsBackend:
         self.sounds = WindowsSounds()
         self.tray = WindowsTray()
         self.autostart = WindowsAutostart()
+        self.system_audio = WindowsSystemAudio()
 
 
 __all__ = ["WindowsBackend"]

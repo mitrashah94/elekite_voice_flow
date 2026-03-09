@@ -43,8 +43,13 @@ class Transcriber:
             self._client = OpenAI(api_key=api_key)
         return self._client
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, context_prompt: str = None) -> str:
         """Send audio to Whisper and return raw transcript.
+
+        Args:
+            audio_path: Path to the WAV audio file
+            context_prompt: Optional context to prepend to the Whisper prompt.
+                           Used by meeting transcription for chunk-to-chunk continuity.
 
         Raises:
             TranscriptionError: On API errors (after showing notification)
@@ -59,8 +64,10 @@ class Transcriber:
         if lang:
             kwargs["language"] = lang
 
-        # Build prompt from dictionary + user prompt
+        # Build prompt from dictionary + user prompt + optional context
         prompt_parts = []
+        if context_prompt:
+            prompt_parts.append(context_prompt)
         if self.config.get("whisper_prompt"):
             prompt_parts.append(self.config["whisper_prompt"])
         dictionary = load_dictionary()

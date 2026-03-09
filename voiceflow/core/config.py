@@ -15,6 +15,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DICTIONARY_FILE = CONFIG_DIR / "dictionary.txt"
 LOG_FILE = CONFIG_DIR / "voiceflow.log"
 RECORDING_DIR = CONFIG_DIR / "recordings"
+MEETING_DIR = CONFIG_DIR / "meetings"
 
 SAMPLE_RATE = 16000  # Whisper expects 16 kHz
 CHANNELS = 1
@@ -34,6 +35,13 @@ DEFAULT_CONFIG = {
     "custom_prompt": "",          # extra instructions for cleanup
     "whisper_prompt": "",         # prompt/context hint for Whisper
     "max_recording_seconds": 300,
+    # Meeting transcription settings
+    "meeting_chunk_seconds": 240,       # 4 min chunks (well under 25MB Whisper limit)
+    "meeting_overlap_seconds": 10,      # overlap between chunks for continuity
+    "meeting_mix_audio": False,         # False = separate mic/system, True = mix
+    "meeting_output_format": "markdown",  # "markdown" or "text"
+    "meeting_output_dir": "",           # empty = ~/.voiceflow/meetings/
+    "meeting_cost_warning": True,       # show cost estimate on start
 }
 
 

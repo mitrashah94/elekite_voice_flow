@@ -14,6 +14,7 @@ from .interfaces import (
     SoundService,
     TrayService,
     AutostartService,
+    SystemAudioService,
 )
 
 # Platform detection at import time
@@ -36,6 +37,7 @@ notifications: NotificationService = backend.notifications
 sounds: SoundService = backend.sounds
 tray: TrayService = backend.tray
 autostart: AutostartService = backend.autostart
+system_audio: SystemAudioService = backend.system_audio
 
 __all__ = [
     "backend",
@@ -44,10 +46,12 @@ __all__ = [
     "sounds",
     "tray",
     "autostart",
+    "system_audio",
     # Re-export interfaces for type hints
     "ClipboardService",
     "NotificationService",
     "SoundService",
     "TrayService",
     "AutostartService",
+    "SystemAudioService",
 ]

@@ -36,6 +36,7 @@ from .config import (
 from .audio import AudioRecorder
 from .transcriber import Transcriber, TranscriptionError
 from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, ALTERNATE_HOTKEY
+from .meeting import MeetingSession
 
 # Import platform services
 from voiceflow.platform import clipboard, notifications, sounds, tray
@@ -206,6 +207,8 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         self.hotkey_mgr = None
         self._processing = False
         self._is_fallback_hotkey = is_fallback_hotkey
+        self._meeting_session = None
+        self._meeting_timer = None
 
         # Build menu
         if rumps is not None:
@@ -218,9 +221,13 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             fallback_indicator = " (fallback)" if is_fallback_hotkey else ""
             self.hotkey_info = rumps.MenuItem(f"Hotkey: {hotkey_display}{fallback_indicator} ({mode_display})", callback=None)
 
+            self.meeting_item = rumps.MenuItem("Start Meeting...", callback=self._toggle_meeting)
+
             self.menu = [
                 self.status_item,
                 self.hotkey_info,
+                None,  # separator
+                self.meeting_item,
                 None,  # separator
                 rumps.MenuItem("Settings...", callback=self.open_settings),
                 rumps.MenuItem("View Log", callback=self.view_log),
@@ -307,6 +314,87 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             except Exception:
                 pass
 
+    # --- Meeting mode ---
+
+    def _toggle_meeting(self, _):
+        """Start or stop meeting transcription."""
+        if self._meeting_session and self._meeting_session.is_active:
+            self._stop_meeting()
+        else:
+            self._start_meeting()
+
+    def _start_meeting(self):
+        if self._meeting_session and self._meeting_session.is_processing:
+            notifications.send("VoiceFlow", "Still processing previous meeting...")
+            return
+
+        # Cost warning
+        if self.config.get("meeting_cost_warning", True) and rumps is not None:
+            response = rumps.alert(
+                title="Start Meeting Transcription?",
+                message=(
+                    "Meeting mode captures mic + system audio and transcribes via Whisper API.\n\n"
+                    "Estimated cost: ~$0.006/min (mic) + ~$0.006/min (system audio)\n"
+                    "A 1-hour meeting ≈ $0.72\n\n"
+                    "Continue?"
+                ),
+                ok="Start Meeting",
+                cancel="Cancel",
+            )
+            if response != 1:  # Cancel pressed
+                return
+
+        self._meeting_session = MeetingSession(self.config)
+        has_system = self._meeting_session.start(
+            on_complete=self._on_meeting_complete,
+            on_progress=self._on_meeting_progress,
+        )
+
+        if rumps is not None:
+            self.meeting_item.title = "Stop Meeting"
+            mode_str = "mic + system" if has_system else "mic only"
+            self.status_item.title = f"Meeting ({mode_str}): 00:00"
+
+        # Start elapsed time updater
+        self._update_meeting_timer()
+
+    def _stop_meeting(self):
+        if self._meeting_session:
+            self._meeting_session.stop()
+            if rumps is not None:
+                self.meeting_item.title = "Processing meeting..."
+                self.meeting_item.set_callback(None)
+                self.status_item.title = "Processing meeting transcript..."
+        if self._meeting_timer:
+            self._meeting_timer.cancel()
+            self._meeting_timer = None
+
+    def _update_meeting_timer(self):
+        """Update the meeting elapsed time in the menu bar."""
+        if not self._meeting_session or not self._meeting_session.is_active:
+            return
+        elapsed = self._meeting_session.elapsed_seconds
+        minutes = int(elapsed // 60)
+        seconds = int(elapsed % 60)
+        if rumps is not None:
+            self.status_item.title = f"Meeting: {minutes:02d}:{seconds:02d}"
+        self._meeting_timer = threading.Timer(1.0, self._update_meeting_timer)
+        self._meeting_timer.daemon = True
+        self._meeting_timer.start()
+
+    def _on_meeting_complete(self, transcript_path: str):
+        """Called when meeting transcription is finished."""
+        log(f"Meeting transcript saved: {transcript_path}")
+        if rumps is not None:
+            self.meeting_item.title = "Start Meeting..."
+            self.meeting_item.set_callback(self._toggle_meeting)
+            self.status_item.title = f"Meeting saved: {os.path.basename(transcript_path)}"
+
+    def _on_meeting_progress(self, current: int, total: int, message: str):
+        """Called during meeting transcription progress."""
+        if rumps is not None:
+            self.status_item.title = f"Meeting: {message}"
+
     # --- Menu callbacks ---
 
     def open_settings(self, _):
@@ -341,6 +429,11 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             )
 
     def quit_app(self, _):
+        # Stop meeting if active
+        if self._meeting_session and self._meeting_session.is_active:
+            self._meeting_session.stop()
+        if self._meeting_timer:
+            self._meeting_timer.cancel()
         if self.hotkey_mgr:
             self.hotkey_mgr.stop()
         if rumps is not None:
@@ -377,12 +470,14 @@ class WindowsVoiceFlowApp:
         self.transcriber = Transcriber(self.config)
         self._processing = False
         self._is_fallback_hotkey = is_fallback_hotkey
+        self._meeting_session = None
 
         # Create tray app (requires WindowsTrayApp to be available)
         self.tray_app = WindowsTrayApp(
             config=self.config,
             on_start_recording=self._start_recording,
             on_stop_recording=self._stop_recording,
+            on_toggle_meeting=self._toggle_meeting,
             is_fallback_hotkey=is_fallback_hotkey,
         )
 
@@ -460,6 +555,28 @@ class WindowsVoiceFlowApp:
             except Exception:
                 pass
 
+    def _toggle_meeting(self):
+        """Start or stop meeting transcription."""
+        if self._meeting_session and self._meeting_session.is_active:
+            self._meeting_session.stop()
+            self.tray_app.set_meeting_state("processing")
+        elif self._meeting_session and self._meeting_session.is_processing:
+            return  # Still processing previous meeting
+        else:
+            self._meeting_session = MeetingSession(self.config)
+            has_system = self._meeting_session.start(
+                on_complete=self._on_meeting_complete,
+                on_progress=self._on_meeting_progress,
+            )
+            self.tray_app.set_meeting_state("active", has_system)
+
+    def _on_meeting_complete(self, transcript_path: str):
+        log(f"Meeting transcript saved: {transcript_path}")
+        self.tray_app.set_meeting_state("idle")
+
+    def _on_meeting_progress(self, current: int, total: int, message: str):
+        pass  # Windows tray doesn't support dynamic status text as easily
+
     def run(self):
         """Run the Windows tray application.
 
@@ -481,6 +598,9 @@ class WindowsVoiceFlowApp:
             while True:
                 time.sleep(0.1)
         except KeyboardInterrupt:
+            # Stop meeting if active
+            if self._meeting_session and self._meeting_session.is_active:
+                self._meeting_session.stop()
             self.hotkey_mgr.stop()
             self.tray_app.stop()
             log(f"{APP_NAME} stopped")

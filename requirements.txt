@@ -19,3 +19,6 @@ Pillow>=9.0.0
 
 # Windows toast notifications (optional — falls back to logging without it)
 winotify>=1.1.0; sys_platform == "win32"
+
+# macOS system audio capture for meeting transcription (optional)
+pyobjc-framework-ScreenCaptureKit>=9.0; sys_platform == "darwin"

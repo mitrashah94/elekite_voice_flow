@@ -71,3 +71,39 @@ class AutostartService(ABC):
     def disable(self) -> None:
         """Disable launch on login."""
         pass
+
+
+class SystemAudioService(ABC):
+    """Abstract interface for capturing system/loopback audio.
+
+    Used by meeting transcription to capture what plays through
+    speakers/headphones (e.g., other participants in a Zoom call).
+    """
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if system audio capture is supported on this platform."""
+        pass
+
+    @abstractmethod
+    def start(self, sample_rate: int, channels: int, dtype: str, callback) -> None:
+        """Start capturing system audio.
+
+        Args:
+            sample_rate: Audio sample rate in Hz (e.g., 16000)
+            channels: Number of audio channels (e.g., 1 for mono)
+            dtype: Audio data type (e.g., 'int16')
+            callback: Function called with (indata, frames, time_info, status)
+                      Same signature as sounddevice.InputStream callback.
+        """
+        pass
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop capturing system audio."""
+        pass
+
+    @abstractmethod
+    def get_source_name(self) -> str:
+        """Return a human-readable name of the audio source being captured."""
+        pass

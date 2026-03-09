@@ -36,6 +36,12 @@ DEFAULT_CONFIG = {
     "custom_prompt": "",
     "whisper_prompt": "",
     "max_recording_seconds": 300,
+    "meeting_chunk_seconds": 240,
+    "meeting_overlap_seconds": 10,
+    "meeting_mix_audio": False,
+    "meeting_output_format": "markdown",
+    "meeting_output_dir": "",
+    "meeting_cost_warning": True,
 }
 
 MODE_OPTIONS = [
@@ -128,7 +134,7 @@ class SettingsApp:
         self.config = self._load_config()
         self.root = tk.Tk()
         self.root.title("VoiceFlow Settings")
-        self.root.geometry("620x720")
+        self.root.geometry("620x820")
         self.root.resizable(False, False)
 
         # macOS appearance tweaks
@@ -338,6 +344,44 @@ class SettingsApp:
         tk.Checkbutton(row, variable=self.notification_var, bg=bg,
                       text=f"Show {notification_platform} notification with result").pack(side="left")
 
+        # --- Meeting Mode Section ---
+        sec = self._section("Meeting Transcription")
+
+        row = self._field_row(sec, "Chunk duration (sec):")
+        self.meeting_chunk_var = tk.IntVar()
+        spin = tk.Spinbox(row, from_=60, to=600, textvariable=self.meeting_chunk_var,
+                         width=10, font=self._body_font)
+        spin.pack(side="left")
+        small_font = (self._body_font[0], self._body_font[1] - 2)
+        tk.Label(row, text="(audio split interval for API)", font=small_font,
+                fg="#888888", bg=bg).pack(side="left", padx=5)
+
+        row = self._field_row(sec, "Mix audio streams:")
+        self.meeting_mix_var = tk.BooleanVar()
+        tk.Checkbutton(row, variable=self.meeting_mix_var, bg=bg,
+                      text="Combine mic + system into one stream").pack(side="left")
+
+        row = self._field_row(sec, "Output format:")
+        self.meeting_format_var = tk.StringVar()
+        combo = ttk.Combobox(row, textvariable=self.meeting_format_var, state="readonly", width=30,
+                            values=["Markdown", "Plain Text"])
+        combo.pack(side="left")
+
+        row = self._field_row(sec, "Output directory:")
+        self.meeting_dir_var = tk.StringVar()
+        dir_entry = tk.Entry(row, textvariable=self.meeting_dir_var, font=self._body_font, width=25)
+        dir_entry.pack(side="left", fill="x", expand=True)
+        tk.Button(row, text="Browse", font=small_font, relief="flat",
+                 command=self._browse_meeting_dir).pack(side="left", padx=5)
+
+        tk.Label(sec, text="Leave empty for default (~/.voiceflow/meetings/)",
+                font=small_font, fg="#888888", bg=bg).pack(anchor="w", padx=5)
+
+        row = self._field_row(sec, "Cost warning:")
+        self.meeting_cost_var = tk.BooleanVar()
+        tk.Checkbutton(row, variable=self.meeting_cost_var, bg=bg,
+                      text="Show cost estimate before starting").pack(side="left")
+
         # --- Dictionary Section ---
         sec = self._section("Custom Dictionary")
         tk.Label(sec, text="Add words, names, and terms that Whisper should recognize:",
@@ -361,6 +405,11 @@ class SettingsApp:
     def _toggle_cleanup(self):
         state = "readonly" if self.ai_cleanup_var.get() else "disabled"
         self.cleanup_combo.config(state=state)
+
+    def _browse_meeting_dir(self):
+        path = filedialog.askdirectory(title="Select Meeting Output Directory")
+        if path:
+            self.meeting_dir_var.set(path)
 
     def _populate_fields(self):
         cfg = self.config
@@ -398,6 +447,14 @@ class SettingsApp:
         self.sound_var.set(cfg.get("sound_feedback", True))
         self.notification_var.set(cfg.get("show_notification", True))
 
+        # Meeting settings
+        self.meeting_chunk_var.set(cfg.get("meeting_chunk_seconds", 240))
+        self.meeting_mix_var.set(cfg.get("meeting_mix_audio", False))
+        fmt = cfg.get("meeting_output_format", "markdown")
+        self.meeting_format_var.set("Markdown" if fmt == "markdown" else "Plain Text")
+        self.meeting_dir_var.set(cfg.get("meeting_output_dir", ""))
+        self.meeting_cost_var.set(cfg.get("meeting_cost_warning", True))
+
         # Load dictionary
         if DICTIONARY_FILE.exists():
             self.dict_text.insert("1.0", DICTIONARY_FILE.read_text())
@@ -430,6 +487,8 @@ class SettingsApp:
                 cleanup_model_val = val
                 break
 
+        meeting_format = "markdown" if self.meeting_format_var.get() == "Markdown" else "text"
+
         self.config.update({
             "api_key": self.api_key_var.get(),
             "hotkey": hotkey_val,
@@ -445,6 +504,11 @@ class SettingsApp:
             "custom_prompt": self.custom_prompt_var.get(),
             "whisper_prompt": self.whisper_prompt_var.get(),
             "max_recording_seconds": self.max_duration_var.get(),
+            "meeting_chunk_seconds": self.meeting_chunk_var.get(),
+            "meeting_mix_audio": self.meeting_mix_var.get(),
+            "meeting_output_format": meeting_format,
+            "meeting_output_dir": self.meeting_dir_var.get(),
+            "meeting_cost_warning": self.meeting_cost_var.get(),
         })
 
         self._save_config()
