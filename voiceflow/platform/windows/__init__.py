@@ -5,6 +5,23 @@ from .notifications import WindowsNotifications
 from .sounds import WindowsSounds
 from .tray import WindowsTray
 from .autostart import WindowsAutostart
+from ..interfaces import SystemAudioService
+
+
+class _NoopSystemAudio(SystemAudioService):
+    """Stub — Windows system audio capture not yet implemented."""
+
+    def is_available(self) -> bool:
+        return False
+
+    def start(self, sample_rate, channels, dtype, callback):
+        raise RuntimeError("System audio capture not available on Windows")
+
+    def stop(self):
+        pass
+
+    def get_source_name(self) -> str:
+        return ""
 
 
 class WindowsBackend:
@@ -22,6 +39,7 @@ class WindowsBackend:
         self.sounds = WindowsSounds()
         self.tray = WindowsTray()
         self.autostart = WindowsAutostart()
+        self.system_audio = _NoopSystemAudio()
 
 
 __all__ = ["WindowsBackend"]
