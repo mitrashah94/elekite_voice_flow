@@ -7,6 +7,17 @@ import threading
 import shutil
 from datetime import datetime
 
+# Fix pynput + pyobjc 12.x incompatibility: pynput accesses AXIsProcessTrusted
+# via HIServices, but pyobjc 12.x removed it from that module's lazy imports.
+# Patch it in from ApplicationServices before pynput loads.
+if sys.platform == "darwin":
+    try:
+        import HIServices
+        from ApplicationServices import AXIsProcessTrusted
+        HIServices.AXIsProcessTrusted = AXIsProcessTrusted
+    except (ImportError, AttributeError):
+        pass
+
 # Lazy imports for optional dependencies
 try:
     from pynput import keyboard as pynput_keyboard
@@ -209,6 +220,7 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         self._is_fallback_hotkey = is_fallback_hotkey
         self._meeting_session = None
         self._meeting_timer = None
+        self._pending_meeting_result = None
 
         # Build menu
         if rumps is not None:
@@ -341,22 +353,31 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                 ok="Start Meeting",
                 cancel="Cancel",
             )
-            if response != 1:  # Cancel pressed
+            if response != 1 and response != 1000:  # Cancel pressed (1000 = NSAlertFirstButtonReturn)
                 return
 
         self._meeting_session = MeetingSession(self.config)
-        has_system = self._meeting_session.start(
-            on_complete=self._on_meeting_complete,
-            on_progress=self._on_meeting_progress,
-        )
+        try:
+            has_system = self._meeting_session.start(
+                on_complete=self._on_meeting_complete,
+                on_progress=self._on_meeting_progress,
+            )
+        except Exception as e:
+            log(f"Meeting: failed to start: {e}")
+            self._meeting_session = None
+            notifications.send("Meeting Error", f"Failed to start: {str(e)[:80]}")
+            return
+
+        self._pending_meeting_result = None
 
         if rumps is not None:
             self.meeting_item.title = "Stop Meeting"
             mode_str = "mic + system" if has_system else "mic only"
             self.status_item.title = f"Meeting ({mode_str}): 00:00"
 
-        # Start elapsed time updater
-        self._update_meeting_timer()
+            # Use rumps.Timer so ticks run on the main thread (AppKit requirement)
+            self._meeting_timer = rumps.Timer(self._meeting_timer_tick, 1)
+            self._meeting_timer.start()
 
     def _stop_meeting(self):
         if self._meeting_session:
@@ -365,35 +386,40 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                 self.meeting_item.title = "Processing meeting..."
                 self.meeting_item.set_callback(None)
                 self.status_item.title = "Processing meeting transcript..."
-        if self._meeting_timer:
-            self._meeting_timer.cancel()
-            self._meeting_timer = None
+        # Don't stop the timer — let it detect when processing finishes
 
-    def _update_meeting_timer(self):
-        """Update the meeting elapsed time in the menu bar."""
-        if not self._meeting_session or not self._meeting_session.is_active:
-            return
-        elapsed = self._meeting_session.elapsed_seconds
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        if rumps is not None:
+    def _meeting_timer_tick(self, sender):
+        """Called every second on the main thread by rumps.Timer."""
+        if self._meeting_session and self._meeting_session.is_active:
+            elapsed = self._meeting_session.elapsed_seconds
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
             self.status_item.title = f"Meeting: {minutes:02d}:{seconds:02d}"
-        self._meeting_timer = threading.Timer(1.0, self._update_meeting_timer)
-        self._meeting_timer.daemon = True
-        self._meeting_timer.start()
-
-    def _on_meeting_complete(self, transcript_path: str):
-        """Called when meeting transcription is finished."""
-        log(f"Meeting transcript saved: {transcript_path}")
-        if rumps is not None:
+        elif self._pending_meeting_result is not None:
+            # Background thread signalled completion — update UI on main thread
+            transcript_path = self._pending_meeting_result
+            self._pending_meeting_result = None
             self.meeting_item.title = "Start Meeting..."
             self.meeting_item.set_callback(self._toggle_meeting)
             self.status_item.title = f"Meeting saved: {os.path.basename(transcript_path)}"
+            sender.stop()
+            self._meeting_timer = None
+        elif self._meeting_session and not self._meeting_session.is_processing:
+            # Session ended with no result (e.g. no audio captured)
+            self.meeting_item.title = "Start Meeting..."
+            self.meeting_item.set_callback(self._toggle_meeting)
+            self.status_item.title = "Ready — waiting for hotkey"
+            sender.stop()
+            self._meeting_timer = None
+
+    def _on_meeting_complete(self, transcript_path: str):
+        """Called from background thread — sets flag for main-thread timer to pick up."""
+        log(f"Meeting transcript saved: {transcript_path}")
+        self._pending_meeting_result = transcript_path
 
     def _on_meeting_progress(self, current: int, total: int, message: str):
-        """Called during meeting transcription progress."""
-        if rumps is not None:
-            self.status_item.title = f"Meeting: {message}"
+        """Called from background thread during transcription."""
+        log(f"Meeting progress: {message}")
 
     # --- Menu callbacks ---
 
@@ -433,7 +459,7 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         if self._meeting_session and self._meeting_session.is_active:
             self._meeting_session.stop()
         if self._meeting_timer:
-            self._meeting_timer.cancel()
+            self._meeting_timer.stop()
         if self.hotkey_mgr:
             self.hotkey_mgr.stop()
         if rumps is not None:
