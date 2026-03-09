@@ -3,8 +3,10 @@
 import os
 import wave
 import time
+import shutil
 import tempfile
 import threading
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 
@@ -40,8 +42,8 @@ class MeetingRecorder:
         self.sample_rate = SAMPLE_RATE
         self.channels = CHANNELS
 
-        self._mic_frames: list = []
-        self._sys_frames: list = []
+        self._mic_frames: deque = deque()
+        self._sys_frames: deque = deque()
         self._mic_stream = None
         self._recording = False
         self._lock = threading.Lock()
@@ -72,8 +74,8 @@ class MeetingRecorder:
             self._chunk_dir = tempfile.mkdtemp(prefix="voiceflow_meeting_")
             self._chunk_index = 0
             self._chunks = []
-            self._mic_frames = []
-            self._sys_frames = []
+            self._mic_frames = deque()
+            self._sys_frames = deque()
             self._recording = True
             self._start_time = time.monotonic()
 
@@ -141,33 +143,36 @@ class MeetingRecorder:
             self._chunk_index += 1
             chunk_info = {"timestamp": time.monotonic() - self._start_time}
 
-            # Calculate overlap in frames
+            # Calculate overlap in frames.
+            # Slicing with [-overlap_frames:] operates on axis=0 (frames),
+            # which works regardless of channel count since arrays are shaped
+            # (total_frames, channels) after np.concatenate(axis=0).
             overlap_frames = int(self.overlap_seconds * self.sample_rate)
 
-            # Flush mic
-            if self._mic_frames:
-                mic_data = np.concatenate(self._mic_frames, axis=0)
+            # Drain mic deque (thread-safe: callbacks only append)
+            mic_frames = list(self._mic_frames)
+            self._mic_frames.clear()
+            if mic_frames:
+                mic_data = np.concatenate(mic_frames, axis=0)
                 chunk_info["mic"] = self._write_wav(
                     mic_data, f"chunk_{self._chunk_index:03d}_mic.wav"
                 )
                 # Keep overlap for next chunk
                 if len(mic_data) > overlap_frames:
-                    self._mic_frames = [mic_data[-overlap_frames:]]
-                else:
-                    self._mic_frames = []
+                    self._mic_frames.append(mic_data[-overlap_frames:])
             else:
                 chunk_info["mic"] = None
 
-            # Flush system audio
-            if self._has_system_audio and self._sys_frames:
-                sys_data = np.concatenate(self._sys_frames, axis=0)
+            # Drain system audio deque
+            sys_frames = list(self._sys_frames)
+            self._sys_frames.clear()
+            if self._has_system_audio and sys_frames:
+                sys_data = np.concatenate(sys_frames, axis=0)
                 chunk_info["system"] = self._write_wav(
                     sys_data, f"chunk_{self._chunk_index:03d}_system.wav"
                 )
                 if len(sys_data) > overlap_frames:
-                    self._sys_frames = [sys_data[-overlap_frames:]]
-                else:
-                    self._sys_frames = []
+                    self._sys_frames.append(sys_data[-overlap_frames:])
             else:
                 chunk_info["system"] = None
 
@@ -188,69 +193,73 @@ class MeetingRecorder:
 
     def stop(self) -> list[dict]:
         """Stop recording and flush remaining audio. Returns list of chunk info dicts."""
+        # Single lock section: stop recording flag, cancel timer, stop streams
         with self._lock:
             if not self._recording:
                 return self._chunks
             self._recording = False
 
-        # Cancel timer
-        if self._chunk_timer:
-            self._chunk_timer.cancel()
-            self._chunk_timer = None
+            # Cancel timer
+            if self._chunk_timer:
+                self._chunk_timer.cancel()
+                self._chunk_timer = None
 
-        # Stop streams
-        if self._mic_stream:
-            try:
-                self._mic_stream.stop()
-                self._mic_stream.close()
-            except Exception as e:
-                log(f"Meeting: error stopping mic: {e}")
-            self._mic_stream = None
+            # Stop streams (under lock so no new callbacks fire after this)
+            if self._mic_stream:
+                try:
+                    self._mic_stream.stop()
+                    self._mic_stream.close()
+                except Exception as e:
+                    log(f"Meeting: error stopping mic: {e}")
+                self._mic_stream = None
 
-        if self._has_system_audio:
-            try:
-                system_audio.stop()
-            except Exception as e:
-                log(f"Meeting: error stopping system audio: {e}")
+            if self._has_system_audio:
+                try:
+                    system_audio.stop()
+                except Exception as e:
+                    log(f"Meeting: error stopping system audio: {e}")
 
-        # Flush remaining audio as final chunk
-        with self._lock:
-            self._chunk_index += 1
-            chunk_info = {"timestamp": time.monotonic() - self._start_time}
+        # Flush remaining audio as final chunk (safe: streams are stopped)
+        self._chunk_index += 1
+        chunk_info = {"timestamp": time.monotonic() - self._start_time}
 
-            if self._mic_frames:
-                mic_data = np.concatenate(self._mic_frames, axis=0)
-                if len(mic_data) / self.sample_rate >= 0.3:  # min duration
-                    chunk_info["mic"] = self._write_wav(
-                        mic_data, f"chunk_{self._chunk_index:03d}_mic.wav"
-                    )
-                else:
-                    chunk_info["mic"] = None
-            else:
-                chunk_info["mic"] = None
-
-            if self._has_system_audio and self._sys_frames:
-                sys_data = np.concatenate(self._sys_frames, axis=0)
-                if len(sys_data) / self.sample_rate >= 0.3:
-                    chunk_info["system"] = self._write_wav(
-                        sys_data, f"chunk_{self._chunk_index:03d}_system.wav"
-                    )
-                else:
-                    chunk_info["system"] = None
-            else:
-                chunk_info["system"] = None
-
-            if self.mix_audio and chunk_info.get("mic") and chunk_info.get("system"):
-                chunk_info["mixed"] = self._mix_and_write(
-                    chunk_info["mic"], chunk_info["system"],
-                    f"chunk_{self._chunk_index:03d}_mixed.wav"
+        mic_frames = list(self._mic_frames)
+        self._mic_frames.clear()
+        if mic_frames:
+            mic_data = np.concatenate(mic_frames, axis=0)
+            if len(mic_data) / self.sample_rate >= 0.3:  # min duration
+                chunk_info["mic"] = self._write_wav(
+                    mic_data, f"chunk_{self._chunk_index:03d}_mic.wav"
                 )
             else:
-                chunk_info["mixed"] = None
+                chunk_info["mic"] = None
+        else:
+            chunk_info["mic"] = None
 
-            if chunk_info["mic"] or chunk_info["system"]:
-                self._chunks.append(chunk_info)
-                log(f"Meeting: flushed final chunk {self._chunk_index}")
+        sys_frames = list(self._sys_frames)
+        self._sys_frames.clear()
+        if self._has_system_audio and sys_frames:
+            sys_data = np.concatenate(sys_frames, axis=0)
+            if len(sys_data) / self.sample_rate >= 0.3:
+                chunk_info["system"] = self._write_wav(
+                    sys_data, f"chunk_{self._chunk_index:03d}_system.wav"
+                )
+            else:
+                chunk_info["system"] = None
+        else:
+            chunk_info["system"] = None
+
+        if self.mix_audio and chunk_info.get("mic") and chunk_info.get("system"):
+            chunk_info["mixed"] = self._mix_and_write(
+                chunk_info["mic"], chunk_info["system"],
+                f"chunk_{self._chunk_index:03d}_mixed.wav"
+            )
+        else:
+            chunk_info["mixed"] = None
+
+        if chunk_info["mic"] or chunk_info["system"]:
+            self._chunks.append(chunk_info)
+            log(f"Meeting: flushed final chunk {self._chunk_index}")
 
         total_duration = time.monotonic() - self._start_time
         log(f"Meeting: recording stopped — {total_duration:.0f}s total, {len(self._chunks)} chunks")
@@ -298,7 +307,6 @@ class MeetingRecorder:
     def cleanup_temp_files(self):
         """Remove temporary chunk directory and all files."""
         if self._chunk_dir and os.path.isdir(self._chunk_dir):
-            import shutil
             shutil.rmtree(self._chunk_dir, ignore_errors=True)
             log(f"Meeting: cleaned up temp dir {self._chunk_dir}")
 

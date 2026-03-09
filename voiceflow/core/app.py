@@ -470,14 +470,12 @@ class WindowsVoiceFlowApp:
         self.transcriber = Transcriber(self.config)
         self._processing = False
         self._is_fallback_hotkey = is_fallback_hotkey
-        self._meeting_session = None
 
         # Create tray app (requires WindowsTrayApp to be available)
         self.tray_app = WindowsTrayApp(
             config=self.config,
             on_start_recording=self._start_recording,
             on_stop_recording=self._stop_recording,
-            on_toggle_meeting=self._toggle_meeting,
             is_fallback_hotkey=is_fallback_hotkey,
         )
 
@@ -555,28 +553,6 @@ class WindowsVoiceFlowApp:
             except Exception:
                 pass
 
-    def _toggle_meeting(self):
-        """Start or stop meeting transcription."""
-        if self._meeting_session and self._meeting_session.is_active:
-            self._meeting_session.stop()
-            self.tray_app.set_meeting_state("processing")
-        elif self._meeting_session and self._meeting_session.is_processing:
-            return  # Still processing previous meeting
-        else:
-            self._meeting_session = MeetingSession(self.config)
-            has_system = self._meeting_session.start(
-                on_complete=self._on_meeting_complete,
-                on_progress=self._on_meeting_progress,
-            )
-            self.tray_app.set_meeting_state("active", has_system)
-
-    def _on_meeting_complete(self, transcript_path: str):
-        log(f"Meeting transcript saved: {transcript_path}")
-        self.tray_app.set_meeting_state("idle")
-
-    def _on_meeting_progress(self, current: int, total: int, message: str):
-        pass  # Windows tray doesn't support dynamic status text as easily
-
     def run(self):
         """Run the Windows tray application.
 
@@ -598,9 +574,6 @@ class WindowsVoiceFlowApp:
             while True:
                 time.sleep(0.1)
         except KeyboardInterrupt:
-            # Stop meeting if active
-            if self._meeting_session and self._meeting_session.is_active:
-                self._meeting_session.stop()
             self.hotkey_mgr.stop()
             self.tray_app.stop()
             log(f"{APP_NAME} stopped")

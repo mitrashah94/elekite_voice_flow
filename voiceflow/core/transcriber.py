@@ -64,12 +64,12 @@ class Transcriber:
         if lang:
             kwargs["language"] = lang
 
-        # Build prompt from dictionary + user prompt + optional context
+        # Build prompt: user prompt takes precedence, then context, then dictionary
         prompt_parts = []
-        if context_prompt:
-            prompt_parts.append(context_prompt)
         if self.config.get("whisper_prompt"):
             prompt_parts.append(self.config["whisper_prompt"])
+        if context_prompt:
+            prompt_parts.append(context_prompt)
         dictionary = load_dictionary()
         if dictionary:
             prompt_parts.append("Custom terms: " + ", ".join(dictionary))
