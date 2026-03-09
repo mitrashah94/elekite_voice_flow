@@ -52,6 +52,7 @@ class MeetingRecorder:
         self._chunk_index = 0
         self._chunks: list[dict] = []  # list of {mic: path, system: path, mixed: path, timestamp: float}
         self._start_time = 0.0
+        self._final_duration = 0.0
         self._has_system_audio = False
 
     @property
@@ -61,7 +62,7 @@ class MeetingRecorder:
     @property
     def elapsed_seconds(self) -> float:
         if not self._recording:
-            return 0.0
+            return self._final_duration
         return time.monotonic() - self._start_time
 
     def start(self) -> bool:
@@ -149,7 +150,9 @@ class MeetingRecorder:
             # (total_frames, channels) after np.concatenate(axis=0).
             overlap_frames = int(self.overlap_seconds * self.sample_rate)
 
-            # Drain mic deque (thread-safe: callbacks only append)
+            # Drain mic deque (thread-safe: callbacks only append).
+            # Note: a callback could append one frame between list() and clear(),
+            # causing ~64ms of audio loss per boundary. Acceptable for meeting use.
             mic_frames = list(self._mic_frames)
             self._mic_frames.clear()
             if mic_frames:
@@ -197,6 +200,7 @@ class MeetingRecorder:
         with self._lock:
             if not self._recording:
                 return self._chunks
+            self._final_duration = time.monotonic() - self._start_time
             self._recording = False
 
             # Cancel timer

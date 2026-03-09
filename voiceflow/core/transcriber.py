@@ -57,7 +57,6 @@ class Transcriber:
         log(f"Transcribing {audio_path} ...")
         kwargs = {
             "model": self.config.get("whisper_model", "whisper-1"),
-            "file": open(audio_path, "rb"),
             "response_format": "text",
         }
         lang = self.config.get("language")
@@ -77,7 +76,9 @@ class Transcriber:
             kwargs["prompt"] = " | ".join(prompt_parts)
 
         try:
-            result = self.client.audio.transcriptions.create(**kwargs)
+            with open(audio_path, "rb") as audio_file:
+                kwargs["file"] = audio_file
+                result = self.client.audio.transcriptions.create(**kwargs)
             text = result.strip() if isinstance(result, str) else str(result).strip()
             log(f"Raw transcript: {text[:120]}...")
             return text

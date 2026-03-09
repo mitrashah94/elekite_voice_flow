@@ -15,8 +15,9 @@ if sys.platform == "darwin":
         import HIServices
         from ApplicationServices import AXIsProcessTrusted
         HIServices.AXIsProcessTrusted = AXIsProcessTrusted
-    except (ImportError, AttributeError):
-        pass
+    except (ImportError, AttributeError) as _patch_err:
+        # Patch failed (e.g. pyobjc version change) — pynput may not work correctly
+        print(f"pyobjc patch: could not patch AXIsProcessTrusted: {_patch_err}", file=sys.stderr)
 
 # Lazy imports for optional dependencies
 try:
@@ -353,7 +354,8 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                 ok="Start Meeting",
                 cancel="Cancel",
             )
-            if response != 1 and response != 1000:  # Cancel pressed (1000 = NSAlertFirstButtonReturn)
+            # rumps returns 1 for OK on older macOS; NSAlertFirstButtonReturn (1000) on newer.
+            if response != 1 and response != 1000:  # Cancel pressed
                 return
 
         self._meeting_session = MeetingSession(self.config)
