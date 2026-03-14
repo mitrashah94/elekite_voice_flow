@@ -17,7 +17,7 @@ except ImportError:
     sd = None
     np = None
 
-from .config import SAMPLE_RATE, CHANNELS, MEETING_DIR, log
+from .config import SAMPLE_RATE, CHANNELS, MEETING_DIR, ensure_private_dir, log, write_secure_text
 from .transcriber import Transcriber, TranscriptionError
 
 from voiceflow.platform import system_audio, notifications, sounds
@@ -590,16 +590,17 @@ class MeetingSession:
             output_dir = self.config.get("meeting_output_dir")
             if output_dir:
                 output_path = Path(output_dir)
+                output_path.mkdir(parents=True, exist_ok=True)
             else:
                 output_path = MEETING_DIR
-            output_path.mkdir(parents=True, exist_ok=True)
+                ensure_private_dir(output_path)
 
             ext = "md" if output_format == "markdown" else "txt"
             ts = self._start_time.strftime("%Y%m%d_%H%M%S")
             filename = f"meeting_{ts}.{ext}"
             filepath = output_path / filename
 
-            filepath.write_text(transcript)
+            write_secure_text(filepath, transcript, private_parent=not bool(output_dir))
             log(f"Meeting transcript saved to {filepath}")
 
             notifications.send(

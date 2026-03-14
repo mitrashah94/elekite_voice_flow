@@ -43,8 +43,10 @@ except ImportError:
 from .config import (
     APP_NAME, APP_VERSION, CONFIG_DIR, CONFIG_FILE, DICTIONARY_FILE,
     LOG_FILE, RECORDING_DIR, DEFAULT_CONFIG,
-    log, load_config, save_config, load_dictionary,
+    ensure_private_dir, log, load_config, save_config, save_dictionary,
+    secure_copy_file,
 )
+from .credentials import migrate_legacy_api_key
 from .audio import AudioRecorder
 from .transcriber import Transcriber, TranscriptionError
 from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, ALTERNATE_HOTKEY
@@ -98,6 +100,19 @@ def paste_transcription(text: str) -> bool:
         )
         # Don't raise - text is in clipboard, user can paste manually
         return False
+
+
+def send_transcription_notification(text: str, config: dict):
+    """Send notifications without exposing transcript content by default."""
+    if not config.get("show_notification"):
+        return
+
+    if config.get("notification_preview"):
+        preview = text[:80] + ("..." if len(text) > 80 else "")
+        notifications.send("VoiceFlow", preview)
+        return
+
+    notifications.send("VoiceFlow", "Transcription complete")
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +237,7 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         self._meeting_session = None
         self._meeting_timer = None
         self._pending_meeting_result = None
+        self._meeting_complete_event = threading.Event()
 
         # Build menu
         if rumps is not None:
@@ -286,19 +302,17 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                 if self.config.get("auto_paste", True):
                     paste_success = paste_transcription(text)
                     if paste_success:
-                        log(f"Pasted: {text[:80]}...")
+                        log("Paste completed")
                     # If paste failed, paste_transcription already showed error notification
-                if self.config.get("show_notification"):
-                    preview = text[:80] + ("..." if len(text) > 80 else "")
-                    notifications.send("VoiceFlow", preview)
+                send_transcription_notification(text, self.config)
                 # Save recording if configured
                 if self.config.get("save_recordings"):
-                    RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+                    ensure_private_dir(RECORDING_DIR)
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     dest = RECORDING_DIR / f"recording_{ts}.wav"
-                    shutil.copy2(audio_path, dest)
+                    secure_copy_file(audio_path, dest)
                 if rumps is not None:
-                    self.status_item.title = f"Last: {text[:50]}..."
+                    self.status_item.title = "Last transcription ready"
             else:
                 if rumps is not None:
                     self.status_item.title = "No speech detected"
@@ -371,6 +385,7 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             return
 
         self._pending_meeting_result = None
+        self._meeting_complete_event.clear()
 
         if rumps is not None:
             self.meeting_item.title = "Stop Meeting"
@@ -397,8 +412,9 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
             self.status_item.title = f"Meeting: {minutes:02d}:{seconds:02d}"
-        elif self._pending_meeting_result is not None:
+        elif self._meeting_complete_event.is_set():
             # Background thread signalled completion — update UI on main thread
+            self._meeting_complete_event.clear()
             transcript_path = self._pending_meeting_result
             self._pending_meeting_result = None
             self.meeting_item.title = "Start Meeting..."
@@ -418,6 +434,7 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         """Called from background thread — sets flag for main-thread timer to pick up."""
         log(f"Meeting transcript saved: {transcript_path}")
         self._pending_meeting_result = transcript_path
+        self._meeting_complete_event.set()
 
     def _on_meeting_progress(self, current: int, total: int, message: str):
         """Called from background thread during transcription."""
@@ -426,11 +443,17 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
     # --- Menu callbacks ---
 
     def open_settings(self, _):
-        """Open the settings editor (launches the config file in default editor)."""
+        """Open the settings GUI."""
         import subprocess
-        # Ensure config exists
-        save_config(self.config)
-        subprocess.run(["open", str(CONFIG_FILE)])
+
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        settings_script = os.path.join(project_root, "settings_gui.py")
+        migrated_key, migration_error = migrate_legacy_api_key(self.config)
+        if migrated_key or not self.config.get("api_key"):
+            save_config(self.config)
+        elif migration_error:
+            log("Skipping config rewrite because secure API key migration is unavailable")
+        subprocess.Popen([sys.executable, settings_script])
 
     def view_log(self, _):
         import subprocess
@@ -548,17 +571,15 @@ class WindowsVoiceFlowApp:
                 if self.config.get("auto_paste", True):
                     paste_success = paste_transcription(text)
                     if paste_success:
-                        log(f"Pasted: {text[:80]}...")
+                        log("Paste completed")
                     # If paste failed, paste_transcription already showed error notification
-                if self.config.get("show_notification"):
-                    preview = text[:80] + ("..." if len(text) > 80 else "")
-                    notifications.send("VoiceFlow", preview)
+                send_transcription_notification(text, self.config)
                 # Save recording if configured
                 if self.config.get("save_recordings"):
-                    RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+                    ensure_private_dir(RECORDING_DIR)
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     dest = RECORDING_DIR / f"recording_{ts}.wav"
-                    shutil.copy2(audio_path, dest)
+                    secure_copy_file(audio_path, dest)
             else:
                 if self.config.get("sound_feedback"):
                     sounds.play("error")
@@ -748,11 +769,21 @@ def main():
 
     # Ensure config directory exists with defaults
     cfg = load_config()
-    save_config(cfg)
+    migrated_key, migration_error = migrate_legacy_api_key(cfg)
+    if migrated_key:
+        save_config(cfg)
+        log("Migrated API key from config into secure storage")
+    elif migration_error:
+        log("API key secure migration unavailable; continuing with existing configuration")
+    elif not CONFIG_FILE.exists():
+        save_config(cfg)
 
     # Create dictionary file if it doesn't exist
     if not DICTIONARY_FILE.exists():
-        DICTIONARY_FILE.write_text("# Add custom words/names here, one per line\n# These help Whisper recognize uncommon terms\n")
+        save_dictionary(
+            "# Add custom words/names here, one per line\n"
+            "# These help Whisper recognize uncommon terms\n"
+        )
 
     # Detect available hotkey with fallback
     active_hotkey, is_fallback = get_active_hotkey()

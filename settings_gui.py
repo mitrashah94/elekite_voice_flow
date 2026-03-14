@@ -10,6 +10,14 @@ import os
 import subprocess
 from pathlib import Path
 
+from voiceflow.core.config import save_dictionary, write_secure_json
+from voiceflow.core.credentials import (
+    describe_api_key_storage,
+    get_api_key,
+    migrate_legacy_api_key,
+    save_api_key,
+)
+
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
@@ -32,6 +40,7 @@ DEFAULT_CONFIG = {
     "auto_paste": True,
     "sound_feedback": True,
     "show_notification": True,
+    "notification_preview": False,
     "save_recordings": False,
     "custom_prompt": "",
     "whisper_prompt": "",
@@ -132,6 +141,9 @@ HOTKEY_OPTIONS = get_hotkey_options()
 class SettingsApp:
     def __init__(self):
         self.config = self._load_config()
+        migrated_key, _ = migrate_legacy_api_key(self.config)
+        if migrated_key:
+            self._save_config()
         self.root = tk.Tk()
         self.root.title("VoiceFlow Settings")
         self.root.geometry("620x820")
@@ -159,9 +171,7 @@ class SettingsApp:
         return dict(DEFAULT_CONFIG)
 
     def _save_config(self):
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(self.config, f, indent=2)
+        write_secure_json(CONFIG_FILE, {k: v for k, v in self.config.items() if k != "api_key"}, private_parent=True)
 
     def _build_ui(self):
         bg = "#f5f5f7" if sys.platform == "darwin" else "#ffffff"
@@ -258,6 +268,13 @@ class SettingsApp:
                                       relief="flat", command=lambda: self._toggle_key_visibility(entry))
         self.show_key_btn.pack(side="left", padx=5)
         self._key_visible = False
+        tk.Label(
+            sec,
+            text=f"Stored securely in {describe_api_key_storage()} when saved here.",
+            font=small_font,
+            fg="#888888",
+            bg=bg,
+        ).pack(anchor="w", padx=5)
 
         # --- Recording Section ---
         sec = self._section("Recording")
@@ -323,6 +340,8 @@ class SettingsApp:
         small_font = (self._body_font[0], self._body_font[1] - 2)
         tk.Label(sec, text="e.g., 'Use British English spelling' or 'Format as bullet points'",
                 font=small_font, fg="#888888", bg=bg).pack(anchor="w", padx=5)
+        tk.Label(sec, text="Custom instructions and Whisper prompts are sent to OpenAI with your audio and transcript.",
+                font=small_font, fg="#888888", bg=bg, wraplength=560, justify="left").pack(anchor="w", padx=5)
 
         # --- Output Section ---
         sec = self._section("Output")
@@ -342,7 +361,14 @@ class SettingsApp:
         # Platform-appropriate notification text
         notification_platform = "Windows" if sys.platform == "win32" else "macOS"
         tk.Checkbutton(row, variable=self.notification_var, bg=bg,
-                      text=f"Show {notification_platform} notification with result").pack(side="left")
+                      text=f"Show {notification_platform} notifications").pack(side="left")
+
+        row = self._field_row(sec, "Notification preview:")
+        self.notification_preview_var = tk.BooleanVar()
+        tk.Checkbutton(row, variable=self.notification_preview_var, bg=bg,
+                      text="Include transcript text in notifications").pack(side="left")
+        tk.Label(sec, text="Clipboard contents and notification previews can expose dictated text to other apps or on-screen history.",
+                font=small_font, fg="#888888", bg=bg, wraplength=560, justify="left").pack(anchor="w", padx=5)
 
         # --- Meeting Mode Section ---
         sec = self._section("Meeting Transcription")
@@ -413,7 +439,7 @@ class SettingsApp:
 
     def _populate_fields(self):
         cfg = self.config
-        self.api_key_var.set(cfg.get("api_key", ""))
+        self.api_key_var.set(get_api_key(cfg))
 
         # Find hotkey display name
         for label, val in HOTKEY_OPTIONS:
@@ -446,6 +472,7 @@ class SettingsApp:
         self.auto_paste_var.set(cfg.get("auto_paste", True))
         self.sound_var.set(cfg.get("sound_feedback", True))
         self.notification_var.set(cfg.get("show_notification", True))
+        self.notification_preview_var.set(cfg.get("notification_preview", False))
 
         # Meeting settings
         self.meeting_chunk_var.set(cfg.get("meeting_chunk_seconds", 240))
@@ -490,7 +517,6 @@ class SettingsApp:
         meeting_format = "markdown" if self.meeting_format_var.get() == "Markdown" else "text"
 
         self.config.update({
-            "api_key": self.api_key_var.get(),
             "hotkey": hotkey_val,
             "mode": mode_val,
             "whisper_model": "whisper-1",
@@ -500,6 +526,7 @@ class SettingsApp:
             "auto_paste": self.auto_paste_var.get(),
             "sound_feedback": self.sound_var.get(),
             "show_notification": self.notification_var.get(),
+            "notification_preview": self.notification_preview_var.get(),
             "save_recordings": self.save_recordings_var.get(),
             "custom_prompt": self.custom_prompt_var.get(),
             "whisper_prompt": self.whisper_prompt_var.get(),
@@ -511,12 +538,20 @@ class SettingsApp:
             "meeting_cost_warning": self.meeting_cost_var.get(),
         })
 
+        ok, error = save_api_key(self.api_key_var.get())
+        if not ok:
+            messagebox.showerror(
+                "VoiceFlow",
+                f"Could not save the API key securely.\n\n{error}\n\n"
+                "You can still use OPENAI_API_KEY as an environment variable.",
+            )
+            return
+
         self._save_config()
 
         # Save dictionary
         dict_content = self.dict_text.get("1.0", tk.END).strip()
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        DICTIONARY_FILE.write_text(dict_content + "\n")
+        save_dictionary(dict_content)
 
         messagebox.showinfo("VoiceFlow", "Settings saved!\n\nRestart VoiceFlow for changes to take effect.")
         self.root.destroy()

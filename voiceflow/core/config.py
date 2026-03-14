@@ -1,8 +1,11 @@
 """VoiceFlow configuration and utility functions."""
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
+import os
 from datetime import datetime
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +34,7 @@ DEFAULT_CONFIG = {
     "auto_paste": True,           # paste result at cursor
     "sound_feedback": True,       # play start/stop sounds
     "show_notification": True,
+    "notification_preview": False,
     "save_recordings": False,
     "custom_prompt": "",          # extra instructions for cleanup
     "whisper_prompt": "",         # prompt/context hint for Whisper
@@ -49,14 +53,93 @@ DEFAULT_CONFIG = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def ensure_private_dir(path: Path) -> Path:
+    """Create an app-owned directory and tighten permissions when supported."""
+    path.mkdir(parents=True, exist_ok=True)
+    ensure_private_permissions(path)
+    return path
+
+
+def ensure_private_permissions(path: Path | str):
+    """Best-effort permission tightening for private app files."""
+    if os.name == "nt":
+        return
+
+    try:
+        target = Path(path)
+        mode = 0o700 if target.is_dir() else 0o600
+        target.chmod(mode)
+    except Exception:
+        pass
+
+
+def write_secure_text(path: Path, content: str, private_parent: bool = False):
+    """Write text with restrictive permissions."""
+    parent = path.parent
+    if private_parent:
+        ensure_private_dir(parent)
+    else:
+        parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = parent / f".{path.name}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    os.replace(tmp_path, path)
+    ensure_private_permissions(path)
+
+
+def write_secure_bytes(path: Path, content: bytes, private_parent: bool = False):
+    """Write bytes with restrictive permissions."""
+    parent = path.parent
+    if private_parent:
+        ensure_private_dir(parent)
+    else:
+        parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = parent / f".{path.name}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+    os.replace(tmp_path, path)
+    ensure_private_permissions(path)
+
+
+def write_secure_json(path: Path, payload: dict, private_parent: bool = False):
+    """Write JSON with restrictive permissions."""
+    write_secure_text(path, json.dumps(payload, indent=2), private_parent=private_parent)
+
+
+def append_secure_log_line(path: Path, line: str):
+    """Append a line to a private log file."""
+    ensure_private_dir(path.parent)
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        handle.write(line)
+    ensure_private_permissions(path)
+
+
+def secure_copy_file(source: Path | str, destination: Path):
+    """Copy a file into a private destination path."""
+    with open(source, "rb") as src:
+        content = src.read()
+    write_secure_bytes(destination, content, private_parent=True)
+
+
+def sanitize_config(cfg: dict) -> dict:
+    """Strip secrets from persisted config."""
+    safe_cfg = dict(cfg)
+    safe_cfg.pop("api_key", None)
+    return safe_cfg
+
+
 def log(msg: str):
     """Append a timestamped message to the log file."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}\n"
     try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(line)
+        append_secure_log_line(LOG_FILE, line)
     except Exception:
         pass
     print(line, end="")
@@ -64,7 +147,7 @@ def log(msg: str):
 
 def load_config() -> dict:
     """Load config from disk, filling in defaults for missing keys."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(CONFIG_DIR)
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
@@ -77,9 +160,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    write_secure_json(CONFIG_FILE, sanitize_config(cfg), private_parent=True)
 
 
 def load_dictionary() -> list[str]:
@@ -87,3 +168,9 @@ def load_dictionary() -> list[str]:
     if DICTIONARY_FILE.exists():
         return [w.strip() for w in DICTIONARY_FILE.read_text().splitlines() if w.strip()]
     return []
+
+
+def save_dictionary(words: str):
+    """Persist dictionary contents with restrictive permissions."""
+    normalized = words.rstrip() + "\n" if words.strip() else ""
+    write_secure_text(DICTIONARY_FILE, normalized, private_parent=True)

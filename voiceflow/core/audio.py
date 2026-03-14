@@ -12,7 +12,7 @@ except ImportError:
     sd = None
     np = None
 
-from .config import SAMPLE_RATE, CHANNELS, log
+from .config import SAMPLE_RATE, CHANNELS, ensure_private_permissions, log
 
 
 class AudioRecorder:
@@ -107,6 +107,7 @@ class AudioRecorder:
 
         # Write to a temp WAV file
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        ensure_private_permissions(tmp.name)
         with wave.open(tmp.name, "wb") as wf:
             wf.setnchannels(self.channels)
             wf.setsampwidth(2)  # 16-bit
