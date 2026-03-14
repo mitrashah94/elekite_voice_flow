@@ -26,7 +26,7 @@ class WindowsNotifications(NotificationService):
         if not WINOTIFY_AVAILABLE:
             # Fallback to logging if winotify not installed
             from voiceflow.core.config import log
-            log(f"[Notification] {title}: {message}")
+            log(f"Notification displayed: {title}")
             return
 
         try:

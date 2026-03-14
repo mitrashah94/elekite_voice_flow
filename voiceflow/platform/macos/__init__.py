@@ -5,6 +5,7 @@ from .notifications import MacOSNotifications
 from .sounds import MacOSSounds
 from .tray import MacOSTray
 from .autostart import MacOSAutostart
+from .system_audio import MacOSSystemAudio
 
 
 class MacOSBackend:
@@ -16,3 +17,4 @@ class MacOSBackend:
         self.sounds = MacOSSounds()
         self.tray = MacOSTray()
         self.autostart = MacOSAutostart()
+        self.system_audio = MacOSSystemAudio()

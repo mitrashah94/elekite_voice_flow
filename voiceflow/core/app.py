@@ -7,6 +7,18 @@ import threading
 import shutil
 from datetime import datetime
 
+# Fix pynput + pyobjc 12.x incompatibility: pynput accesses AXIsProcessTrusted
+# via HIServices, but pyobjc 12.x removed it from that module's lazy imports.
+# Patch it in from ApplicationServices before pynput loads.
+if sys.platform == "darwin":
+    try:
+        import HIServices
+        from ApplicationServices import AXIsProcessTrusted
+        HIServices.AXIsProcessTrusted = AXIsProcessTrusted
+    except (ImportError, AttributeError) as _patch_err:
+        # Patch failed (e.g. pyobjc version change) — pynput may not work correctly
+        print(f"pyobjc patch: could not patch AXIsProcessTrusted: {_patch_err}", file=sys.stderr)
+
 # Lazy imports for optional dependencies
 try:
     from pynput import keyboard as pynput_keyboard
@@ -31,11 +43,14 @@ except ImportError:
 from .config import (
     APP_NAME, APP_VERSION, CONFIG_DIR, CONFIG_FILE, DICTIONARY_FILE,
     LOG_FILE, RECORDING_DIR, DEFAULT_CONFIG,
-    log, load_config, save_config, load_dictionary,
+    ensure_private_dir, log, load_config, save_config, save_dictionary,
+    secure_copy_file,
 )
+from .credentials import migrate_legacy_api_key
 from .audio import AudioRecorder
 from .transcriber import Transcriber, TranscriptionError
 from .hotkey import get_active_hotkey, get_hotkey_display_name, PRIMARY_HOTKEY, ALTERNATE_HOTKEY
+from .meeting import MeetingSession
 
 # Import platform services
 from voiceflow.platform import clipboard, notifications, sounds, tray
@@ -85,6 +100,19 @@ def paste_transcription(text: str) -> bool:
         )
         # Don't raise - text is in clipboard, user can paste manually
         return False
+
+
+def send_transcription_notification(text: str, config: dict):
+    """Send notifications without exposing transcript content by default."""
+    if not config.get("show_notification"):
+        return
+
+    if config.get("notification_preview"):
+        preview = text[:80] + ("..." if len(text) > 80 else "")
+        notifications.send("VoiceFlow", preview)
+        return
+
+    notifications.send("VoiceFlow", "Transcription complete")
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +234,10 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
         self.hotkey_mgr = None
         self._processing = False
         self._is_fallback_hotkey = is_fallback_hotkey
+        self._meeting_session = None
+        self._meeting_timer = None
+        self._pending_meeting_result = None
+        self._meeting_complete_event = threading.Event()
 
         # Build menu
         if rumps is not None:
@@ -218,9 +250,13 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             fallback_indicator = " (fallback)" if is_fallback_hotkey else ""
             self.hotkey_info = rumps.MenuItem(f"Hotkey: {hotkey_display}{fallback_indicator} ({mode_display})", callback=None)
 
+            self.meeting_item = rumps.MenuItem("Start Meeting...", callback=self._toggle_meeting)
+
             self.menu = [
                 self.status_item,
                 self.hotkey_info,
+                None,  # separator
+                self.meeting_item,
                 None,  # separator
                 rumps.MenuItem("Settings...", callback=self.open_settings),
                 rumps.MenuItem("View Log", callback=self.view_log),
@@ -266,19 +302,17 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
                 if self.config.get("auto_paste", True):
                     paste_success = paste_transcription(text)
                     if paste_success:
-                        log(f"Pasted: {text[:80]}...")
+                        log("Paste completed")
                     # If paste failed, paste_transcription already showed error notification
-                if self.config.get("show_notification"):
-                    preview = text[:80] + ("..." if len(text) > 80 else "")
-                    notifications.send("VoiceFlow", preview)
+                send_transcription_notification(text, self.config)
                 # Save recording if configured
                 if self.config.get("save_recordings"):
-                    RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+                    ensure_private_dir(RECORDING_DIR)
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     dest = RECORDING_DIR / f"recording_{ts}.wav"
-                    shutil.copy2(audio_path, dest)
+                    secure_copy_file(audio_path, dest)
                 if rumps is not None:
-                    self.status_item.title = f"Last: {text[:50]}..."
+                    self.status_item.title = "Last transcription ready"
             else:
                 if rumps is not None:
                     self.status_item.title = "No speech detected"
@@ -307,14 +341,119 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             except Exception:
                 pass
 
+    # --- Meeting mode ---
+
+    def _toggle_meeting(self, _):
+        """Start or stop meeting transcription."""
+        if self._meeting_session and self._meeting_session.is_active:
+            self._stop_meeting()
+        else:
+            self._start_meeting()
+
+    def _start_meeting(self):
+        if self._meeting_session and self._meeting_session.is_processing:
+            notifications.send("VoiceFlow", "Still processing previous meeting...")
+            return
+
+        # Cost warning
+        if self.config.get("meeting_cost_warning", True) and rumps is not None:
+            response = rumps.alert(
+                title="Start Meeting Transcription?",
+                message=(
+                    "Meeting mode captures mic + system audio and transcribes via Whisper API.\n\n"
+                    "Estimated cost: ~$0.006/min (mic) + ~$0.006/min (system audio)\n"
+                    "A 1-hour meeting ≈ $0.72\n\n"
+                    "Continue?"
+                ),
+                ok="Start Meeting",
+                cancel="Cancel",
+            )
+            # rumps returns 1 for OK on older macOS; NSAlertFirstButtonReturn (1000) on newer.
+            if response != 1 and response != 1000:  # Cancel pressed
+                return
+
+        self._meeting_session = MeetingSession(self.config)
+        try:
+            has_system = self._meeting_session.start(
+                on_complete=self._on_meeting_complete,
+                on_progress=self._on_meeting_progress,
+            )
+        except Exception as e:
+            log(f"Meeting: failed to start: {e}")
+            self._meeting_session = None
+            notifications.send("Meeting Error", f"Failed to start: {str(e)[:80]}")
+            return
+
+        self._pending_meeting_result = None
+        self._meeting_complete_event.clear()
+
+        if rumps is not None:
+            self.meeting_item.title = "Stop Meeting"
+            mode_str = "mic + system" if has_system else "mic only"
+            self.status_item.title = f"Meeting ({mode_str}): 00:00"
+
+            # Use rumps.Timer so ticks run on the main thread (AppKit requirement)
+            self._meeting_timer = rumps.Timer(self._meeting_timer_tick, 1)
+            self._meeting_timer.start()
+
+    def _stop_meeting(self):
+        if self._meeting_session:
+            self._meeting_session.stop()
+            if rumps is not None:
+                self.meeting_item.title = "Processing meeting..."
+                self.meeting_item.set_callback(None)
+                self.status_item.title = "Processing meeting transcript..."
+        # Don't stop the timer — let it detect when processing finishes
+
+    def _meeting_timer_tick(self, sender):
+        """Called every second on the main thread by rumps.Timer."""
+        if self._meeting_session and self._meeting_session.is_active:
+            elapsed = self._meeting_session.elapsed_seconds
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            self.status_item.title = f"Meeting: {minutes:02d}:{seconds:02d}"
+        elif self._meeting_complete_event.is_set():
+            # Background thread signalled completion — update UI on main thread
+            self._meeting_complete_event.clear()
+            transcript_path = self._pending_meeting_result
+            self._pending_meeting_result = None
+            self.meeting_item.title = "Start Meeting..."
+            self.meeting_item.set_callback(self._toggle_meeting)
+            self.status_item.title = f"Meeting saved: {os.path.basename(transcript_path)}"
+            sender.stop()
+            self._meeting_timer = None
+        elif self._meeting_session and not self._meeting_session.is_processing:
+            # Session ended with no result (e.g. no audio captured)
+            self.meeting_item.title = "Start Meeting..."
+            self.meeting_item.set_callback(self._toggle_meeting)
+            self.status_item.title = "Ready — waiting for hotkey"
+            sender.stop()
+            self._meeting_timer = None
+
+    def _on_meeting_complete(self, transcript_path: str):
+        """Called from background thread — sets flag for main-thread timer to pick up."""
+        log(f"Meeting transcript saved: {transcript_path}")
+        self._pending_meeting_result = transcript_path
+        self._meeting_complete_event.set()
+
+    def _on_meeting_progress(self, current: int, total: int, message: str):
+        """Called from background thread during transcription."""
+        log(f"Meeting progress: {message}")
+
     # --- Menu callbacks ---
 
     def open_settings(self, _):
-        """Open the settings editor (launches the config file in default editor)."""
+        """Open the settings GUI."""
         import subprocess
-        # Ensure config exists
-        save_config(self.config)
-        subprocess.run(["open", str(CONFIG_FILE)])
+
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        settings_script = os.path.join(project_root, "settings_gui.py")
+        migrated_key, migration_error = migrate_legacy_api_key(self.config)
+        if migrated_key or not self.config.get("api_key"):
+            save_config(self.config)
+        elif migration_error:
+            log("Skipping config rewrite because secure API key migration is unavailable")
+        subprocess.Popen([sys.executable, settings_script])
 
     def view_log(self, _):
         import subprocess
@@ -341,6 +480,11 @@ class VoiceFlowApp(_TrayAppBase if _TrayAppBase is not None else object):
             )
 
     def quit_app(self, _):
+        # Stop meeting if active
+        if self._meeting_session and self._meeting_session.is_active:
+            self._meeting_session.stop()
+        if self._meeting_timer:
+            self._meeting_timer.stop()
         if self.hotkey_mgr:
             self.hotkey_mgr.stop()
         if rumps is not None:
@@ -427,17 +571,15 @@ class WindowsVoiceFlowApp:
                 if self.config.get("auto_paste", True):
                     paste_success = paste_transcription(text)
                     if paste_success:
-                        log(f"Pasted: {text[:80]}...")
+                        log("Paste completed")
                     # If paste failed, paste_transcription already showed error notification
-                if self.config.get("show_notification"):
-                    preview = text[:80] + ("..." if len(text) > 80 else "")
-                    notifications.send("VoiceFlow", preview)
+                send_transcription_notification(text, self.config)
                 # Save recording if configured
                 if self.config.get("save_recordings"):
-                    RECORDING_DIR.mkdir(parents=True, exist_ok=True)
+                    ensure_private_dir(RECORDING_DIR)
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     dest = RECORDING_DIR / f"recording_{ts}.wav"
-                    shutil.copy2(audio_path, dest)
+                    secure_copy_file(audio_path, dest)
             else:
                 if self.config.get("sound_feedback"):
                     sounds.play("error")
@@ -627,11 +769,21 @@ def main():
 
     # Ensure config directory exists with defaults
     cfg = load_config()
-    save_config(cfg)
+    migrated_key, migration_error = migrate_legacy_api_key(cfg)
+    if migrated_key:
+        save_config(cfg)
+        log("Migrated API key from config into secure storage")
+    elif migration_error:
+        log("API key secure migration unavailable; continuing with existing configuration")
+    elif not CONFIG_FILE.exists():
+        save_config(cfg)
 
     # Create dictionary file if it doesn't exist
     if not DICTIONARY_FILE.exists():
-        DICTIONARY_FILE.write_text("# Add custom words/names here, one per line\n# These help Whisper recognize uncommon terms\n")
+        save_dictionary(
+            "# Add custom words/names here, one per line\n"
+            "# These help Whisper recognize uncommon terms\n"
+        )
 
     # Detect available hotkey with fallback
     active_hotkey, is_fallback = get_active_hotkey()

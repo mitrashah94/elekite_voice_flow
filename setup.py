@@ -11,6 +11,15 @@ import subprocess
 import shutil
 from pathlib import Path
 
+from voiceflow.core.config import save_config, save_dictionary, write_secure_text
+from voiceflow.core.credentials import (
+    describe_api_key_storage,
+    get_api_key,
+    load_stored_api_key,
+    migrate_legacy_api_key,
+    save_api_key,
+)
+
 APP_NAME = "VoiceFlow"
 CONFIG_DIR = Path.home() / ".voiceflow"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -111,13 +120,19 @@ def setup_portaudio():
 
 def configure_api_key():
     """Prompt user for their OpenAI API key."""
-    existing = ""
+    config = {}
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
-                existing = json.load(f).get("api_key", "")
+                config = json.load(f)
         except Exception:
             pass
+
+    migrated_key, _ = migrate_legacy_api_key(config)
+    if migrated_key:
+        save_config(config)
+
+    existing = load_stored_api_key()
 
     env_key = os.environ.get("OPENAI_API_KEY", "")
 
@@ -139,7 +154,7 @@ def configure_api_key():
     print("  Get one at: https://platform.openai.com/api-keys\n")
     key = input("  Enter your OpenAI API key: ").strip()
     if not key:
-        print("  ⚠️  No key provided. You can set it later in ~/.voiceflow/config.json")
+        print(f"  ⚠️  No key provided. You can set it later in {describe_api_key_storage()} or OPENAI_API_KEY")
         return ""
     return key
 
@@ -219,7 +234,7 @@ def create_launch_script():
     """Create a convenient launch script."""
     script_dir = Path(__file__).parent.resolve()
     launch_path = script_dir / "start.sh"
-    launch_path.write_text(f"""#!/bin/bash
+    write_secure_text(launch_path, f"""#!/bin/bash
 # VoiceFlow launcher
 cd "{script_dir}"
 python3 voiceflow.py "$@"
@@ -266,7 +281,7 @@ def create_launchd_plist():
 </dict>
 </plist>"""
 
-    plist_path.write_text(plist_content)
+    write_secure_text(plist_path, plist_content)
     print(f"  ✅  LaunchAgent created: {plist_path}")
     print("     VoiceFlow will start automatically on next login.")
     print(f"     To remove: launchctl unload {plist_path} && rm {plist_path}")
@@ -303,7 +318,6 @@ def main():
     # Step 6: Save config
     print_step(6, total_steps, "Saving Configuration")
     config = {
-        "api_key": api_key,
         "hotkey": hotkey,
         "mode": mode,
         "whisper_model": "whisper-1",
@@ -313,20 +327,27 @@ def main():
         "auto_paste": True,
         "sound_feedback": True,
         "show_notification": True,
+        "notification_preview": False,
         "save_recordings": False,
         "custom_prompt": "",
         "whisper_prompt": "",
         "max_recording_seconds": 300,
     }
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    if api_key:
+        ok, error = save_api_key(api_key)
+        if not ok:
+            print(f"  ❌  Could not save API key securely: {error}")
+            print("     Set OPENAI_API_KEY and re-run setup, or try again after unlocking your secure store.")
+            sys.exit(1)
+    save_config(config)
     print(f"  ✅  Config saved to {CONFIG_FILE}")
+    if api_key:
+        print(f"  ✅  API key saved to {describe_api_key_storage()}")
 
     # Create dictionary file
     dict_file = CONFIG_DIR / "dictionary.txt"
     if not dict_file.exists():
-        dict_file.write_text(
+        save_dictionary(
             "# VoiceFlow Custom Dictionary\n"
             "# Add words/names that Whisper should recognize, one per line.\n"
             "# Example:\n"

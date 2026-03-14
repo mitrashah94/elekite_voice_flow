@@ -13,6 +13,7 @@ except ImportError:
     RateLimitError = None
 
 from .config import log, load_dictionary
+from .credentials import get_api_key
 
 # Import platform services for error notifications
 from voiceflow.platform import notifications, sounds
@@ -37,32 +38,40 @@ class Transcriber:
     @property
     def client(self):
         if self._client is None:
-            api_key = self.config.get("api_key") or os.environ.get("OPENAI_API_KEY")
+            api_key = get_api_key(self.config)
             if not api_key:
-                raise ValueError("No OpenAI API key configured. Set it in ~/.voiceflow/config.json or OPENAI_API_KEY env var.")
+                raise ValueError(
+                    "No OpenAI API key configured. Set it in VoiceFlow Settings or OPENAI_API_KEY."
+                )
             self._client = OpenAI(api_key=api_key)
         return self._client
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str, context_prompt: str = None) -> str:
         """Send audio to Whisper and return raw transcript.
+
+        Args:
+            audio_path: Path to the WAV audio file
+            context_prompt: Optional context to prepend to the Whisper prompt.
+                           Used by meeting transcription for chunk-to-chunk continuity.
 
         Raises:
             TranscriptionError: On API errors (after showing notification)
         """
-        log(f"Transcribing {audio_path} ...")
+        log(f"Transcribing audio file {os.path.basename(audio_path)}")
         kwargs = {
             "model": self.config.get("whisper_model", "whisper-1"),
-            "file": open(audio_path, "rb"),
             "response_format": "text",
         }
         lang = self.config.get("language")
         if lang:
             kwargs["language"] = lang
 
-        # Build prompt from dictionary + user prompt
+        # Build prompt: user prompt takes precedence, then context, then dictionary
         prompt_parts = []
         if self.config.get("whisper_prompt"):
             prompt_parts.append(self.config["whisper_prompt"])
+        if context_prompt:
+            prompt_parts.append(context_prompt)
         dictionary = load_dictionary()
         if dictionary:
             prompt_parts.append("Custom terms: " + ", ".join(dictionary))
@@ -70,9 +79,11 @@ class Transcriber:
             kwargs["prompt"] = " | ".join(prompt_parts)
 
         try:
-            result = self.client.audio.transcriptions.create(**kwargs)
+            with open(audio_path, "rb") as audio_file:
+                kwargs["file"] = audio_file
+                result = self.client.audio.transcriptions.create(**kwargs)
             text = result.strip() if isinstance(result, str) else str(result).strip()
-            log(f"Raw transcript: {text[:120]}...")
+            log(f"Transcript received ({len(text)} chars)")
             return text
 
         except AuthenticationError as e:
@@ -99,7 +110,7 @@ class Transcriber:
         except OpenAIError as e:
             # Catch-all for other OpenAI errors
             error_msg = f"Transcription failed: {type(e).__name__}"
-            log(f"OpenAI error: {e}")
+            log(f"OpenAI error during transcription: {type(e).__name__}")
             sounds.play("error")
             notifications.send("Transcription Error", error_msg)
             raise TranscriptionError(error_msg) from e
@@ -107,7 +118,7 @@ class Transcriber:
         except Exception as e:
             # Non-OpenAI errors (shouldn't happen but be safe)
             error_msg = "Transcription failed: Unexpected error"
-            log(f"Unexpected error during transcription: {e}")
+            log(f"Unexpected error during transcription: {type(e).__name__}: {e}")
             sounds.play("error")
             notifications.send("Transcription Error", error_msg)
             raise TranscriptionError(error_msg) from e
@@ -148,7 +159,7 @@ class Transcriber:
                 max_tokens=4096,
             )
             cleaned = response.choices[0].message.content.strip()
-            log(f"Cleaned text: {cleaned[:120]}...")
+            log(f"Transcript cleanup complete ({len(cleaned)} chars)")
             return cleaned
 
         except AuthenticationError as e:
@@ -175,14 +186,14 @@ class Transcriber:
         except OpenAIError as e:
             # Catch-all for other OpenAI errors
             error_msg = f"Cleanup failed: {type(e).__name__}"
-            log(f"OpenAI error during cleanup: {e}")
+            log(f"OpenAI error during cleanup: {type(e).__name__}")
             sounds.play("error")
             notifications.send("Transcription Error", error_msg)
             raise TranscriptionError(error_msg) from e
 
         except Exception as e:
             # Non-OpenAI errors - don't fail silently, but continue with raw text
-            log(f"Unexpected error during cleanup: {e} - returning raw text")
+            log(f"Unexpected cleanup error: {type(e).__name__} - returning raw text")
             return raw_text
 
     def process(self, audio_path: str) -> str:
